@@ -111,7 +111,7 @@ public final class TilingEngine: ObservableObject {
             passUsage = passUsage + outcome.usage
             if let e = outcome.error, aiError == nil { aiError = e }
 
-            applyAndSuppress { totalMoved += applier.apply(plan: outcome.plan, to: group) }
+            applyAndSuppress { totalMoved += applier.apply(plan: outcome.plan, to: group, clampTo: display.visibleFrame) }
             newGrid.append(contentsOf: gridTiles(from: outcome.plan, windows: group))
         }
 

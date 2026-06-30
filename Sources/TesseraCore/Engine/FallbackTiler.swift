@@ -1,10 +1,18 @@
 import Foundation
 import CoreGraphics
 
-/// A deterministic, offline tiler used when no API key is set or the LLM call fails. It is
-/// intentionally simple — a column-based split that respects each app's width prior — so the app is
-/// always useful even without Claude.
+/// A deterministic, offline tiler used when no API key is set, when the user is in offline mode, or
+/// when the LLM call fails. Windows arrive in recency order (front-most first).
+///
+/// When everything fits, it lays the windows out in a min-aware grid. When there are more windows
+/// than can each get a comfortable tile, it tiles the most-recently-used windows properly and
+/// demotes the older overflow to a small cascaded stack in the corner — rather than squeezing every
+/// window down to an unusable (and off-screen-prone) sliver.
 public enum FallbackTiler {
+
+    /// A "real" tile should be at least this big; used to decide how many windows fit before the
+    /// rest are demoted. Most apps refuse to shrink much below this anyway.
+    public static let comfortableCell = CGSize(width: 460, height: 320)
 
     public static func plan(
         display: DisplayInfo,
@@ -19,8 +27,28 @@ public enum FallbackTiler {
             return LayoutPlan(displaySignature: display.signature, tiles: [])
         }
 
-        // Order widest-preference first (using learned priors when present) for a stable,
-        // sensible left-to-right arrangement.
+        // How many windows can each get a comfortable tile on this display?
+        let maxCols = Swift.max(1, Int((area.width + g) / (comfortableCell.width + g)))
+        let maxRows = Swift.max(1, Int((area.height + g) / (comfortableCell.height + g)))
+        let capacity = maxCols * maxRows
+
+        // `windows` is recency order (front-most first): the most-recent get proper tiles.
+        let primary = Array(windows.prefix(min(windows.count, capacity)))
+        let overflow = Array(windows.dropFirst(primary.count))
+
+        var tiles = gridTiles(area: area, windows: primary, g: g, catalog: catalog, learned: learned)
+        tiles.append(contentsOf: cascadeTiles(area: area, windows: overflow, g: g))
+        return LayoutPlan(displaySignature: display.signature, tiles: tiles)
+    }
+
+    /// Lay windows out in a min-aware grid filling `area`, anchored top-left.
+    private static func gridTiles(
+        area: CGRect, windows: [ManagedWindow], g: CGFloat,
+        catalog: CategoryCatalog, learned: LearnedDimensions
+    ) -> [Tile] {
+        guard !windows.isEmpty else { return [] }
+
+        // Within the primary set, order widest-preference first for a stable left-to-right layout.
         func prior(_ w: ManagedWindow) -> Double { catalog.widthPrior(id: w.categoryId, bundleId: w.bundleId, learned: learned) }
         let ordered = windows.sorted { prior($0) > prior($1) }
 
@@ -31,8 +59,6 @@ public enum FallbackTiler {
             while i < ordered.count { out.append(Array(ordered[i..<min(ordered.count, i + rpc)])); i += rpc }
             return out
         }
-        // A column must be at least the widest minimum among its windows, and at most the narrowest
-        // maximum — so e.g. a chat window with a sidebar keeps its minimum even on a small display.
         func columnMin(_ ws: [ManagedWindow]) -> CGFloat {
             ws.map { catalog.profile(id: $0.categoryId).minWidth }.max() ?? 0
         }
@@ -40,8 +66,7 @@ public enum FallbackTiler {
             ws.map { catalog.maxWidth(id: $0.categoryId, bundleId: $0.bundleId, usableWidth: area.width, learned: learned) }.min() ?? area.width
         }
 
-        // Pick the most columns (up to the preference) whose minimum widths actually fit the usable
-        // width — fewer columns on a narrow display rather than squeezing windows below their min.
+        // Most columns whose minimum widths fit; fewer columns on a narrow display.
         let desired = max(1, min(ordered.count, columnCount(for: ordered.count)))
         var columnWindows = group(into: 1)
         var c = desired
@@ -53,8 +78,7 @@ public enum FallbackTiler {
         }
         let nCols = columnWindows.count
 
-        // Start every column at its minimum, then distribute the leftover width up to each column's
-        // max. Anything still left over stays as empty desktop on the right (we never over-stretch).
+        // Start each column at its min, then distribute leftover width up to each column's max.
         let inner = area.width - g * CGFloat(nCols + 1)
         let maxes = columnWindows.map(columnMax)
         var colWidths = columnWindows.enumerated().map { min(columnMin($0.element), maxes[$0.offset], inner) }
@@ -69,8 +93,6 @@ public enum FallbackTiler {
             }
         }
 
-        // Pack tiles from the left edge toward the right; any unused width is left as empty desktop
-        // on the right side (we do NOT center the block).
         var tiles: [Tile] = []
         var xCursor = area.minX + g
         for (c, ws) in columnWindows.enumerated() {
@@ -79,15 +101,28 @@ public enum FallbackTiler {
             let rowHeight = (area.height - g * CGFloat(rows + 1)) / CGFloat(rows)
             for (r, window) in ws.enumerated() {
                 let y = area.minY + g + CGFloat(r) * (rowHeight + g)
-                // Cap height to the window's max so a tall display doesn't over-stretch it; the tile
-                // stays anchored at the top of its row slot, leaving any extra as empty desktop.
                 let maxH = catalog.maxHeight(id: window.categoryId, bundleId: window.bundleId, usableHeight: area.height, learned: learned)
                 let h = min(rowHeight, maxH)
                 tiles.append(Tile(windowId: window.id, frame: CGRect(x: xCursor, y: y, width: cw, height: h)))
             }
             xCursor += cw + g
         }
-        return LayoutPlan(displaySignature: display.signature, tiles: tiles)
+        return tiles
+    }
+
+    /// Demote overflow windows to a small cascaded stack near the bottom-right, kept on-screen.
+    private static func cascadeTiles(area: CGRect, windows: [ManagedWindow], g: CGFloat) -> [Tile] {
+        guard !windows.isEmpty else { return [] }
+        let w = Swift.min(comfortableCell.width, area.width - 2 * g)
+        let h = Swift.min(comfortableCell.height, area.height - 2 * g)
+        let step: CGFloat = 30
+        return windows.enumerated().map { i, window in
+            var x = area.maxX - g - w - CGFloat(i) * step
+            var y = area.maxY - g - h - CGFloat(i) * step
+            x = Swift.min(Swift.max(x, area.minX + g), area.maxX - g - w)
+            y = Swift.min(Swift.max(y, area.minY + g), area.maxY - g - h)
+            return Tile(windowId: window.id, frame: CGRect(x: x, y: y, width: w, height: h))
+        }
     }
 
     private static func columnCount(for n: Int) -> Int {

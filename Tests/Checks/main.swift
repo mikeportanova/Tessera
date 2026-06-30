@@ -278,6 +278,32 @@ do {
     check(withNew.categoryId(bundleId: nil, appName: "Miro") == profile.id, "an example app classifies to the new category")
 }
 
+// MARK: - Too many windows: recency-priority + on-screen guarantee
+
+do {
+    // 30 windows on a normal display: every window gets a tile, and none is off-screen.
+    let many = (0..<30).map { _ in makeWindow("browser") }
+    let plan = FallbackTiler.plan(display: display, windows: many, gap: 8, catalog: cat)
+    check(plan.tiles.count == 30, "every window gets a tile even when there are too many")
+    check(plan.tiles.allSatisfy { display.visibleFrame.contains($0.frame) }, "no tile is pushed off-screen")
+    // Overflow windows are demoted to the small comfortable-cell size.
+    let small = plan.tiles.filter { abs($0.frame.width - FallbackTiler.comfortableCell.width) < 0.5 }
+    check(!small.isEmpty, "overflow windows are demoted to small cascaded tiles")
+}
+
+do {
+    // On-screen guard: a window that can't shrink and spills past the edge is pulled back.
+    let area = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let spilling = CGRect(x: 900, y: 700, width: 400, height: 300)   // extends past right/bottom
+    let fixed = WindowApplier.onScreenOrigin(for: spilling, in: area)
+    check(fixed != nil, "a spilling window is corrected")
+    if let fixed {
+        check(fixed.x + 400 <= area.maxX + 0.5 && fixed.y + 300 <= area.maxY + 0.5, "correction brings it fully on-screen")
+    }
+    check(WindowApplier.onScreenOrigin(for: CGRect(x: 10, y: 10, width: 100, height: 100), in: area) == nil,
+          "an already on-screen window needs no correction")
+}
+
 // MARK: - Prompt token efficiency
 
 do {

@@ -29,6 +29,10 @@ public enum Prompt {
       preferred widths, starting from the left. With 3–4: combine columns and rows. With more:
       prefer a grid. Always grow rightward from the left edge.
     - Respect each window's minSize: don't make a tile smaller than its given minWidth/minHeight.
+    - Windows are listed most-recently-used first. If there are more windows than can each get a tile
+      at or above its minSize, give the most-recent windows proper tiles and place the older overflow
+      as a small stack in a corner (each at least its minSize). Never make a tile below its minSize
+      and never push any window off-screen — leaving some windows stacked is better than either.
     - Coordinates are top-left origin (y grows downward), in the SAME coordinate space as the \
       provided usable area. Every tile must lie fully within the usable area.
 

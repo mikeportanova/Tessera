@@ -65,12 +65,14 @@ public final class AppModel: ObservableObject {
             .store(in: &cancellables)
 
         // Live gap: dragging the gap slider re-applies the current layout immediately via the fast
-        // offline tiler (no LLM, no token cost) — no need to press Tile Now again. Debounced so a
-        // slider drag doesn't thrash, and only when something is already tiled.
+        // offline tiler (no LLM, no token cost) — no need to press Tile Now again.
+        // NOTE: use DispatchQueue.main (not RunLoop.main) so updates are delivered *during* the
+        // slider's mouse-tracking loop, and throttle (not debounce) so it updates continuously as
+        // the slider moves rather than only after release. Only fires when something is tiled.
         settings.$gap
             .dropFirst()
             .removeDuplicates()
-            .debounce(for: .milliseconds(120), scheduler: RunLoop.main)
+            .throttle(for: .milliseconds(140), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in
                 guard let self, self.engine.hasActiveLayout else { return }
                 Task { await self.engine.retile(useAI: false) }

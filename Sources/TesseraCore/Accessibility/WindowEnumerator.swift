@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import ApplicationServices
+import CoreGraphics
 
 /// Produces the set of `ManagedWindow`s currently on screen that Tessera can tile.
 ///
@@ -52,6 +53,31 @@ public struct WindowEnumerator {
                 )
             }
         }
-        return result
+
+        // Return in recency order — front-most first — using the window-server z-order as a proxy
+        // for "most recently interacted with." (Geometry + owner pid don't require Screen Recording.)
+        let z = onScreenZOrder()
+        func rank(_ win: ManagedWindow) -> Int {
+            var best = Int.max
+            var bestDist = CGFloat.greatestFiniteMagnitude
+            for (i, e) in z.enumerated() where e.pid == win.pid {
+                let d = abs(e.bounds.minX - win.frame.minX) + abs(e.bounds.minY - win.frame.minY)
+                if d < bestDist { bestDist = d; best = i }
+            }
+            return best
+        }
+        return result.sorted { rank($0) < rank($1) }
+    }
+
+    /// On-screen windows in front-to-back order with their owner pid and bounds (CG top-left).
+    private func onScreenZOrder() -> [(pid: pid_t, bounds: CGRect)] {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        return info.compactMap { dict in
+            guard let pid = dict[kCGWindowOwnerPID as String] as? pid_t,
+                  let b = dict[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = b["X"], let y = b["Y"], let w = b["Width"], let h = b["Height"]
+            else { return nil }
+            return (pid, CGRect(x: x, y: y, width: w, height: h))
+        }
     }
 }
