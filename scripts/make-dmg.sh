@@ -33,5 +33,7 @@ xcrun notarytool submit "$DMG" --keychain-profile "$PROFILE" --wait
 xcrun stapler staple "$DMG"
 
 echo "▸ Verifying…"
-spctl --assess --type open --context context:primary-signature "$DMG" 2>&1 | sed 's/^/    /' || true
+# A DMG is notarized + stapled, not code-signed, so `spctl` reports "no usable signature" on the
+# image itself — that's normal. The authoritative check is the stapled ticket:
+xcrun stapler validate "$DMG" 2>&1 | sed 's/^/    /'
 echo "✓ Ready to share: $DMG"
