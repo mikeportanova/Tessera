@@ -1,0 +1,28 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode (in case it's opened there)
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+xcuserdata/
+
+# Built app bundle
+*.app
+dist/
+
+# macOS
+.DS_Store
+
+# Secrets — the API key lives in the Keychain, never on disk, but guard against accidents
+*.env
+secrets.json
+
+# Code-signing material — private key / CSR must never be committed
+signing/
+*.pem
+*.p12
+*.certSigningRequest
+*.cer
