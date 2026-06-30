@@ -54,6 +54,12 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(tileShortcut.rawValue, forKey: Keys.tileShortcut) }
     }
 
+    /// When on, Tessera never calls the LLM — even "Tile Now" uses the built-in offline tiler.
+    /// Zero cost, no network. (Auto-arrange is always offline regardless.)
+    @Published public var offlineMode: Bool {
+        didSet { defaults.set(offlineMode, forKey: Keys.offlineMode) }
+    }
+
     /// Whether an API key is present (mirrors Keychain; published for UI binding).
     @Published public var hasAPIKey: Bool
 
@@ -66,6 +72,7 @@ public final class AppSettings: ObservableObject {
         self.maxAICallsPerHour = defaults.object(forKey: Keys.maxAICallsPerHour) as? Int ?? 20
         self.snapEnabled = defaults.object(forKey: Keys.snapEnabled) as? Bool ?? true
         self.tileShortcut = TileShortcut(rawValue: defaults.string(forKey: Keys.tileShortcut) ?? "") ?? .ctrlOptCmdT
+        self.offlineMode = defaults.object(forKey: Keys.offlineMode) as? Bool ?? false
         self.hasAPIKey = Keychain.hasAPIKey
     }
 
@@ -82,5 +89,6 @@ public final class AppSettings: ObservableObject {
         static let maxAICallsPerHour = "maxAICallsPerHour"
         static let snapEnabled = "snapEnabled"
         static let tileShortcut = "tileShortcut"
+        static let offlineMode = "offlineMode"
     }
 }

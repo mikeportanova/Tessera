@@ -74,7 +74,7 @@ public final class AppModel: ObservableObject {
     // MARK: - Actions exposed to the menu
 
     public func tileNow() {
-        Task { await engine.retile() }
+        Task { await engine.retile(useAI: !settings.offlineMode) }
     }
 
     public func saveLayout(named name: String) {

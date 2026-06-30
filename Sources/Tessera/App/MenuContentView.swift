@@ -139,7 +139,8 @@ struct MenuContentView: View {
         Button {
             model.tileNow()
         } label: {
-            Label("Tile Now", systemImage: "wand.and.stars")
+            Label(settings.offlineMode ? "Tile Now (offline)" : "Tile Now",
+                  systemImage: settings.offlineMode ? "square.grid.2x2" : "wand.and.stars")
                 .font(.body.weight(.medium))
                 .frame(maxWidth: .infinity)
         }
@@ -164,10 +165,16 @@ struct MenuContentView: View {
             }
             .help("Drag a window onto another tile to swap them; resize a tile to reflow its neighbors. No AI used.")
 
+            Toggle(isOn: $settings.offlineMode) {
+                Label("Offline mode (no AI)", systemImage: "wifi.slash")
+            }
+            .help("Never call Claude — even Tile Now uses the built-in tiler. Zero cost, no network.")
+
             Toggle(isOn: $settings.contentAware) {
                 Label("Content-aware (screenshot)", systemImage: "camera.viewfinder")
             }
             .help("Lets the AI arrange by on-screen content. Requires Screen Recording permission.")
+            .disabled(settings.offlineMode)
 
             HStack(spacing: 10) {
                 Label("Gap", systemImage: "square.dashed")
@@ -185,7 +192,11 @@ struct MenuContentView: View {
 
     @ViewBuilder
     private var aiBudget: some View {
-        if settings.hasAPIKey {
+        if settings.offlineMode {
+            Label("Offline mode — built-in tiler only, no tokens used.", systemImage: "wifi.slash")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        } else if settings.hasAPIKey {
             HStack(spacing: 8) {
                 Label("AI this hour", systemImage: "brain")
                     .font(.caption).foregroundStyle(.secondary)
