@@ -185,6 +185,20 @@ do {
     check(Reflow.indexOfTile(containing: CGPoint(x: 150, y: 50), in: tiles) == nil, "indexOfTile returns nil in a gap")
 }
 
+do {
+    // Title-bar gate: a swap source must be grabbed from the top strip, not the content area.
+    let tiles = [
+        makeTile(CGRect(x: 0, y: 0, width: 500, height: 800)),     // tile 0
+        makeTile(CGRect(x: 520, y: 0, width: 500, height: 800)),   // tile 1
+    ]
+    // A point in tile 0's title bar (y < 30) → recognized as a window grab.
+    check(Reflow.indexOfTile(titleBarContaining: CGPoint(x: 100, y: 10), in: tiles) == 0,
+          "title-bar grab in the top strip is detected")
+    // A point deep in tile 0's content (y = 400, like a file icon) → NOT a window grab.
+    check(Reflow.indexOfTile(titleBarContaining: CGPoint(x: 100, y: 400), in: tiles) == nil,
+          "a drag starting in the content area is not a title-bar grab (no swap)")
+}
+
 // MARK: - Max-width caps (don't over-stretch; left-align)
 
 do {

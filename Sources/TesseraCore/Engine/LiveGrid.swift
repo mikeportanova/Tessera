@@ -102,6 +102,20 @@ public enum Reflow {
         tiles.firstIndex { $0.target.contains(point) }
     }
 
+    /// Height (points) of the title-bar grab strip at the top of a tile. You move a macOS window by
+    /// its title bar, so a drag that *starts* here is a window move; a drag starting below it is
+    /// content (e.g. dragging a file out of the window) and must not trigger a swap.
+    public static let titleBarGrabHeight: CGFloat = 30
+
+    /// Index of the tile whose **title-bar strip** contains `point` (CG top-left coords), if any.
+    public static func indexOfTile(titleBarContaining point: CGPoint, in tiles: [GridTile]) -> Int? {
+        tiles.firstIndex { tile in
+            let h = Swift.min(titleBarGrabHeight, tile.target.height)
+            let bar = CGRect(x: tile.target.minX, y: tile.target.minY, width: tile.target.width, height: h)
+            return bar.contains(point)
+        }
+    }
+
     // MARK: - Helpers
 
     private static func approxEqual(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= tolerance }

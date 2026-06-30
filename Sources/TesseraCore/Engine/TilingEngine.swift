@@ -134,9 +134,13 @@ public final class TilingEngine: ObservableObject {
     // MARK: - Swap (drag one tile onto another)
 
     /// Swap the tiles under two CG (top-left) points. Returns true if a swap happened.
+    ///
+    /// The drag must *start on the source window's title bar* — that's how you grab a window to move
+    /// it. A drag that starts in a window's content area (e.g. dragging a file out of it) is not a
+    /// window move and must never trigger a swap, even if it ends over another tile.
     @discardableResult
     public func attemptSwap(fromCG: CGPoint, toCG: CGPoint) -> Bool {
-        guard let i = Reflow.indexOfTile(containing: fromCG, in: grid),
+        guard let i = Reflow.indexOfTile(titleBarContaining: fromCG, in: grid),
               let j = Reflow.indexOfTile(containing: toCG, in: grid),
               i != j else { return false }
 
