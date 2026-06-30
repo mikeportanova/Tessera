@@ -38,38 +38,43 @@ public enum Prompt {
     /// Build the user-message text describing the display and windows.
     /// `display` and window frames are in CG (top-left) coordinates. `learned` supplies width priors
     /// the user has taught Tessera by resizing tiles over time.
+    /// The id we put on the wire for the window at index `i`. Short (`w0`, `w1`, …) rather than a
+    /// 36-char UUID — paid for on both the prompt *and* the echoed-back output, so the saving is
+    /// doubled. `parseTiles` maps it back to the window by the same index.
+    public static func shortID(_ index: Int) -> String { "w\(index)" }
+
+    /// Build the user-message text describing the display and windows.
+    /// `display` and window frames are in CG (top-left) coordinates. `learned` supplies width priors
+    /// the user has taught Tessera. `includeTitles` adds window titles (only worth the tokens when a
+    /// screenshot is also attached for content-aware tiling).
     public static func userText(
         display: DisplayInfo,
         windows: [ManagedWindow],
         gap: Double,
         catalog: CategoryCatalog,
-        learned: LearnedDimensions = .empty
+        learned: LearnedDimensions = .empty,
+        includeTitles: Bool = false
     ) -> String {
         let vf = display.visibleFrame
         var lines: [String] = []
-        lines.append("Display: \(Int(display.frame.width))x\(Int(display.frame.height)) @\(Int(display.backingScale))x")
-        lines.append("Usable area (tile within this): x=\(Int(vf.origin.x)), y=\(Int(vf.origin.y)), width=\(Int(vf.width)), height=\(Int(vf.height))")
-        lines.append("Gap between tiles: \(Int(gap))pt")
+        lines.append("Display \(Int(display.frame.width))x\(Int(display.frame.height)) @\(Int(display.backingScale))x")
+        lines.append("Usable area (place tiles inside this): x=\(Int(vf.origin.x)) y=\(Int(vf.origin.y)) w=\(Int(vf.width)) h=\(Int(vf.height)); gap \(Int(gap))pt")
         lines.append("")
-        lines.append("Windows to place (\(windows.count)):")
-        for w in windows {
+        lines.append("Windows (id | app | category | widthPrior | min wxh | max wxh):")
+        for (i, w) in windows.enumerated() {
             let prior = catalog.widthPrior(id: w.categoryId, bundleId: w.bundleId, learned: learned)
             let isLearned = learned.dims(bundleId: w.bundleId, categoryId: w.categoryId) != nil
             let maxW = catalog.maxWidth(id: w.categoryId, bundleId: w.bundleId, usableWidth: vf.width, learned: learned)
             let maxH = catalog.maxHeight(id: w.categoryId, bundleId: w.bundleId, usableHeight: vf.height, learned: learned)
             let p = catalog.profile(id: w.categoryId)
-            lines.append(
-                "- id=\(w.id.uuidString) | app=\"\(w.appName)\" | category=\(p.name) "
-                + "| widthPrior=\(String(format: "%.2f", prior))\(isLearned ? " (learned from this user)" : "") "
-                + "| minSize=\(Int(p.minWidth))x\(Int(p.minHeight))pt | maxWidth=\(Int(maxW))pt | maxHeight=\(Int(maxH))pt "
-                + "| currentSize=\(Int(w.frame.width))x\(Int(w.frame.height)) | title=\"\(w.title.prefix(60))\""
-            )
+            var line = "\(shortID(i)) | \(w.appName) | \(p.name) | \(String(format: "%.2f", prior))\(isLearned ? "*" : "")"
+                + " | \(Int(p.minWidth))x\(Int(p.minHeight)) | \(Int(maxW))x\(Int(maxH))"
+            if includeTitles, !w.title.isEmpty { line += " | \"\(w.title.prefix(50))\"" }
+            lines.append(line)
         }
         lines.append("")
-        lines.append("Width priors marked \"(learned from this user)\" reflect how this person has "
-            + "previously resized that app — weight them heavily. Never exceed a window's maxWidth or "
-            + "maxHeight; leave empty desktop instead.")
-        lines.append("Produce a tile for every window id above, using its id verbatim.")
+        lines.append("widthPrior is a fraction of usable width; * means learned from this user (weight it heavily).")
+        lines.append("Never exceed a window's max wxh; leave empty desktop instead. Place a tile for every id, echoing the id verbatim.")
         return lines.joined(separator: "\n")
     }
 
@@ -85,7 +90,7 @@ public enum Prompt {
                 "items": [
                     "type": "object",
                     "properties": [
-                        "window_id": ["type": "string", "description": "The window id, copied verbatim."],
+                        "window_id": ["type": "string", "description": "The window id (e.g. w0), copied verbatim."],
                         "x": ["type": "number"],
                         "y": ["type": "number"],
                         "width": ["type": "number"],

@@ -48,7 +48,8 @@ public struct LayoutPlanner: Sendable {
             let result = try await client.requestLayout(
                 model: model.rawValue,
                 system: Prompt.system,
-                userText: Prompt.userText(display: display, windows: windows, gap: gap, catalog: catalog, learned: learned),
+                userText: Prompt.userText(display: display, windows: windows, gap: gap, catalog: catalog,
+                                          learned: learned, includeTitles: image != nil),
                 toolName: "emit_layout",
                 toolSchema: Prompt.layoutToolSchema,
                 image: image
@@ -76,7 +77,8 @@ public struct LayoutPlanner: Sendable {
         guard let rawTiles = input["tiles"] as? [[String: Any]] else {
             throw ClaudeClient.ClientError.decoding("missing tiles array")
         }
-        let byId = Dictionary(uniqueKeysWithValues: windows.map { ($0.id.uuidString, $0) })
+        // Map the short ids (w0, w1, …) we put in the prompt back to windows by their index.
+        let byId = Dictionary(uniqueKeysWithValues: windows.enumerated().map { (Prompt.shortID($0.offset), $0.element) })
 
         var tiles: [Tile] = []
         for raw in rawTiles {

@@ -263,6 +263,21 @@ do {
     check(withNew.categoryId(bundleId: nil, appName: "Miro") == profile.id, "an example app classifies to the new category")
 }
 
+// MARK: - Prompt token efficiency
+
+do {
+    let w0 = makeWindow("browser")
+    let w1 = makeWindow("terminal")
+    let text = Prompt.userText(display: display, windows: [w0, w1], gap: 8, catalog: cat)
+    check(text.contains("w0") && text.contains("w1"), "prompt uses short window ids")
+    check(!text.contains(w0.id.uuidString) && !text.contains(w1.id.uuidString), "prompt no longer embeds 36-char UUIDs")
+    check(!text.contains("currentSize"), "prompt dropped currentSize")
+    check(!text.contains("title="), "prompt drops titles when no screenshot is attached")
+    let withTitles = Prompt.userText(display: display, windows: [w0], gap: 8, catalog: cat, includeTitles: true)
+    check(Prompt.shortID(3) == "w3", "shortID format")
+    _ = withTitles
+}
+
 // MARK: - Token usage + pricing
 
 do {
