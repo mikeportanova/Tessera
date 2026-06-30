@@ -113,6 +113,21 @@ do {
 }
 
 do {
+    // Chat's min width is generous (sidebar + thread), and the offline tiler honors it even on a
+    // small display rather than squeezing the window below it.
+    check(cat.profile(id: "chat").minWidth >= 600, "chat category min width is generous")
+    let small = DisplayInfo(id: 1, frame: CGRect(x: 0, y: 0, width: 1280, height: 800),
+                            visibleFrame: CGRect(x: 0, y: 25, width: 1280, height: 775),
+                            backingScale: 2, isPrimary: true)
+    let browser = makeWindow("browser")
+    let chat = makeWindow("chat")
+    let plan = FallbackTiler.plan(display: small, windows: [browser, chat], gap: 8, catalog: cat)
+    let chatTile = plan.tiles.first { $0.windowId == chat.id }!
+    check(chatTile.frame.width >= cat.profile(id: "chat").minWidth - 0.5,
+          "chat keeps at least its min width on a small display")
+}
+
+do {
     // A single window is capped in BOTH width and height to its category max, anchored top-left.
     let plan = FallbackTiler.plan(display: display, windows: [makeWindow("browser")], gap: 8, catalog: cat)
     let tile = plan.tiles[0]

@@ -33,6 +33,10 @@ public final class TilingEngine: ObservableObject {
     /// The frames Tessera last assigned, with live AX handles — survives re-enumeration.
     private var grid: [GridTile] = []
 
+    /// Whether a layout is currently applied (something has been tiled). Used to decide whether a
+    /// live setting change like the gap should be re-applied.
+    public var hasActiveLayout: Bool { !grid.isEmpty }
+
     /// Guard against overlapping planning passes.
     private var isPlanning = false
     /// Ignore geometry notifications until this instant — set after we apply frames ourselves, so

@@ -16,6 +16,12 @@ public final class CategoryStore: ObservableObject {
 
     private let fileURL: URL
 
+    /// Versioned on-disk shape. Legacy files were a bare `[CategoryProfile]` (treated as version 1).
+    private struct Persisted: Codable {
+        var seedVersion: Int
+        var profiles: [CategoryProfile]
+    }
+
     public init() {
         let base = FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -24,15 +30,31 @@ public final class CategoryStore: ObservableObject {
         self.fileURL = base.appendingPathComponent("categories.json")
 
         let builtIns = CategoryStore.builtInProfiles()
-        if let data = try? Data(contentsOf: fileURL),
-           var saved = try? JSONDecoder().decode([CategoryProfile].self, from: data) {
-            // Add any built-ins introduced in newer versions that the saved file predates.
-            let savedIds = Set(saved.map(\.id))
-            saved.append(contentsOf: builtIns.filter { !savedIds.contains($0.id) })
-            self.profiles = saved
+        let data = try? Data(contentsOf: fileURL)
+
+        if let data, let p = try? JSONDecoder().decode(Persisted.self, from: data) {
+            self.profiles = CategoryStore.reconcile(saved: p.profiles, savedVersion: p.seedVersion, builtIns: builtIns)
+            if p.seedVersion < CategoryStore.builtInSeedVersion { save() }
+        } else if let data, let legacy = try? JSONDecoder().decode([CategoryProfile].self, from: data) {
+            // Legacy unversioned file → version 1: refresh built-ins to current defaults.
+            self.profiles = CategoryStore.reconcile(saved: legacy, savedVersion: 1, builtIns: builtIns)
+            save()
         } else {
             self.profiles = builtIns
         }
+    }
+
+    /// Merge a saved profile list with the current built-ins. Custom categories are always kept. If
+    /// the saved file predates the current seed version, built-ins are refreshed to current defaults
+    /// (so improved defaults like chat min-width propagate); otherwise the user's built-ins are kept
+    /// and only newly-introduced built-ins are appended.
+    nonisolated private static func reconcile(saved: [CategoryProfile], savedVersion: Int, builtIns: [CategoryProfile]) -> [CategoryProfile] {
+        let customs = saved.filter { !$0.isBuiltIn }
+        if savedVersion < builtInSeedVersion {
+            return builtIns + customs
+        }
+        let savedIds = Set(saved.map(\.id))
+        return saved + builtIns.filter { !savedIds.contains($0.id) }
     }
 
     public func snapshot() -> CategoryCatalog { CategoryCatalog(profiles: profiles) }
@@ -49,13 +71,13 @@ public final class CategoryStore: ObservableObject {
         } else {
             profiles.append(profile)
         }
-        save()
+        scheduleSave()   // sliders/steppers fire rapidly — coalesce the disk writes
     }
 
     public func delete(id: String) {
         guard let p = profiles.first(where: { $0.id == id }), !p.isBuiltIn else { return }
         profiles.removeAll { $0.id == id }
-        save()
+        scheduleSave()
     }
 
     /// Restore a built-in category to its shipped defaults (no effect on custom categories).
@@ -63,7 +85,7 @@ public final class CategoryStore: ObservableObject {
         guard let def = CategoryStore.builtInProfiles().first(where: { $0.id == id }),
               let idx = profiles.firstIndex(where: { $0.id == id }) else { return }
         profiles[idx] = def
-        save()
+        scheduleSave()
     }
 
     /// Generate a new custom category from a name + example apps, using the LLM to infer sensible
@@ -87,8 +109,23 @@ public final class CategoryStore: ObservableObject {
 
     // MARK: - Persistence
 
+    private var saveTask: Task<Void, Never>?
+
+    /// Write any pending debounced changes immediately (call on app termination).
+    public func flush() { saveTask?.cancel(); save() }
+
+    /// Coalesce rapid edits (slider/stepper drags) into a single write ~0.4s after they settle.
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
+    }
+
     private func save() {
-        guard let data = try? JSONEncoder().encode(profiles) else { return }
+        guard let data = try? JSONEncoder().encode(Persisted(seedVersion: CategoryStore.builtInSeedVersion, profiles: profiles)) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
 
@@ -128,11 +165,18 @@ public final class CategoryStore: ObservableObject {
 
     nonisolated private static func seedMins(_ c: AppCategory) -> (CGFloat, CGFloat) {
         switch c {
-        case .chat: return (380, 480)
+        // Chat apps (Messages, Slack) have a sidebar/conversation rail plus the message thread, so
+        // they need real width or content gets clipped — don't let them go narrow.
+        case .chat: return (640, 480)
         case .music: return (300, 420)
         default: return (340, 240)
         }
     }
+
+    /// Bumped whenever the built-in seed values change, so updates reach installed copies. On load,
+    /// a persisted file with an older version has its **built-in** profiles refreshed to these
+    /// defaults (custom categories are always preserved).
+    nonisolated static let builtInSeedVersion = 2
 
     nonisolated private static func seedBundleIds(_ c: AppCategory) -> [String] {
         switch c {

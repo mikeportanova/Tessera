@@ -38,4 +38,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         model.start()
     }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        model.shutdown()
+    }
 }

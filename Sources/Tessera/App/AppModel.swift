@@ -64,11 +64,30 @@ public final class AppModel: ObservableObject {
             .sink { [weak self] shortcut in self?.hotKey.apply(shortcut) }
             .store(in: &cancellables)
 
+        // Live gap: dragging the gap slider re-applies the current layout immediately via the fast
+        // offline tiler (no LLM, no token cost) — no need to press Tile Now again. Debounced so a
+        // slider drag doesn't thrash, and only when something is already tiled.
+        settings.$gap
+            .dropFirst()
+            .removeDuplicates()
+            .debounce(for: .milliseconds(120), scheduler: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self, self.engine.hasActiveLayout else { return }
+                Task { await self.engine.retile(useAI: false) }
+            }
+            .store(in: &cancellables)
+
         refreshSavedLayouts()
     }
 
     public func approveExtraAICalls() {
         engine.approveExtraAICalls()
+    }
+
+    /// Flush debounced writes so a quick quit can't drop a recent edit.
+    public func shutdown() {
+        categoryStore.flush()
+        dimensionMemory.flush()
     }
 
     // MARK: - Actions exposed to the menu

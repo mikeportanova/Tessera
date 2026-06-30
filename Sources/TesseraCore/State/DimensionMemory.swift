@@ -85,7 +85,7 @@ public final class DimensionMemory: ObservableObject {
             .adding(width: w, height: h)
 
         sampleCount = store.byBundle.values.reduce(0) { $0 + $1.samples }
-        save()
+        scheduleSave()   // a resize-drag records repeatedly — coalesce the writes
     }
 
     public func snapshot() -> LearnedDimensions {
@@ -105,6 +105,21 @@ public final class DimensionMemory: ObservableObject {
               let decoded = try? JSONDecoder().decode(Store.self, from: data) else { return }
         store = decoded
         sampleCount = store.byBundle.values.reduce(0) { $0 + $1.samples }
+    }
+
+    private var saveTask: Task<Void, Never>?
+
+    /// Write any pending debounced changes immediately (call on app termination).
+    public func flush() { saveTask?.cancel(); save() }
+
+    /// Coalesce rapid records (a single resize drag fires several) into one write.
+    private func scheduleSave() {
+        saveTask?.cancel()
+        saveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
     }
 
     private func save() {
