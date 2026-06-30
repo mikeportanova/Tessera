@@ -127,3 +127,88 @@ public enum Reflow {
         a.minX < b.maxX - tolerance && a.maxX > b.minX + tolerance
     }
 }
+
+/// Pure geometry for Magnet-style drag-to-snap: the empty rectangle a window would fill at a point,
+/// and the edge-biased half/quarter of it.
+public enum Snap {
+    /// Largest empty axis-aligned rectangle containing `point`, within `area`, avoiding `occupied`.
+    /// Returns nil if the point is inside an occupied rect (caller should treat that as a swap, not
+    /// a snap).
+    ///
+    /// The optimal rectangle's edges always line up with either the work-area edge or an obstacle
+    /// edge, so we enumerate those candidate edges on each axis and search every
+    /// (left,right) × (bottom,top) combination that brackets the point, keeping the largest one whose
+    /// interior touches no obstacle. Candidates are tried widest-first so the cheap area check prunes
+    /// the rest before the obstacle test runs. Unlike a greedy shrink, this always finds the true
+    /// maximum even when several windows border the open region (the L-shaped gaps real desktops
+    /// produce). Window counts are small, so the full search is inexpensive.
+    public static func largestEmptyRect(containing point: CGPoint, in area: CGRect, avoiding occupied: [CGRect]) -> CGRect? {
+        guard area.contains(point) else { return nil }
+
+        // Clip obstacles to the work area; a pointer sitting inside one means "swap", not "snap".
+        var obstacles: [CGRect] = []
+        for o in occupied {
+            let c = o.intersection(area)
+            if c.isNull || c.isEmpty { continue }
+            if c.contains(point) { return nil }
+            obstacles.append(c)
+        }
+
+        // Candidate edges: work-area bounds plus every obstacle edge.
+        var xSet = Set<CGFloat>([area.minX, area.maxX])
+        var ySet = Set<CGFloat>([area.minY, area.maxY])
+        for o in obstacles {
+            xSet.insert(o.minX); xSet.insert(o.maxX)
+            ySet.insert(o.minY); ySet.insert(o.maxY)
+        }
+        // Order so the widest/tallest spans come first → the area prune below stays effective.
+        let lefts   = xSet.filter { $0 <= point.x }.sorted()          // smaller x first → wider
+        let rights  = xSet.filter { $0 >= point.x }.sorted(by: >)     // larger x first  → wider
+        let bottoms = ySet.filter { $0 <= point.y }.sorted()
+        let tops    = ySet.filter { $0 >= point.y }.sorted(by: >)
+
+        func hitsObstacle(_ r: CGRect) -> Bool {
+            for o in obstacles {
+                let i = o.intersection(r)
+                if !i.isNull && i.width > 0.5 && i.height > 0.5 { return true }
+            }
+            return false
+        }
+
+        var best: CGRect?
+        var bestArea: CGFloat = 0
+        for l in lefts {
+            for r in rights where r - l > 1 {
+                let width = r - l
+                for b in bottoms {
+                    for t in tops where t - b > 1 {
+                        let a = width * (t - b)
+                        if a <= bestArea { continue }            // cheap prune before the obstacle test
+                        let cand = CGRect(x: l, y: b, width: width, height: t - b)
+                        if hitsObstacle(cand) { continue }
+                        bestArea = a; best = cand
+                    }
+                }
+            }
+        }
+        return best
+    }
+
+    /// Bias an empty rect toward the cursor: near a left/right edge → that half; near top/bottom →
+    /// that half; a corner → that quarter; the middle → the whole rect. `edgeZone` is the fraction
+    /// of each side that counts as "near."
+    public static func biased(_ empty: CGRect, toward cursor: CGPoint, edgeZone: CGFloat = 0.33) -> CGRect {
+        var r = empty
+        if cursor.x < empty.minX + empty.width * edgeZone {
+            r = CGRect(x: r.minX, y: r.minY, width: r.width / 2, height: r.height)
+        } else if cursor.x > empty.maxX - empty.width * edgeZone {
+            r = CGRect(x: empty.midX, y: r.minY, width: r.width / 2, height: r.height)
+        }
+        if cursor.y < empty.minY + empty.height * edgeZone {
+            r = CGRect(x: r.minX, y: r.minY, width: r.width, height: r.height / 2)
+        } else if cursor.y > empty.maxY - empty.height * edgeZone {
+            r = CGRect(x: r.minX, y: r.minY + r.height / 2, width: r.width, height: r.height / 2)
+        }
+        return r
+    }
+}

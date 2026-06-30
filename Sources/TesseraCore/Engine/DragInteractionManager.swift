@@ -1,13 +1,12 @@
 import Foundation
 import AppKit
 
-/// Implements **drag-to-swap**: grab a tiled window and drop it onto another tile to swap their
-/// positions. Uses a global mouse monitor (read-only — it observes, never consumes events) so it
-/// needs only the Accessibility permission Tessera already requires.
+/// Drives Magnet-style drag interactions by forwarding global mouse events to the engine: grab a
+/// window by its title bar and the engine previews (with an overlay) where it will land — snapping
+/// into open desktop area, or swapping when dropped onto another tile — and applies it on release.
 ///
-/// Disambiguation is geometric and free: a swap only fires when the drag *starts in one tile and
-/// ends in a different one*. Dragging within a single tile (e.g. resizing via an edge) leaves the
-/// source and target tiles equal, so `TilingEngine.attemptSwap` no-ops.
+/// Uses global mouse monitors (read-only — they observe, never consume events), so it needs only the
+/// Accessibility permission Tessera already requires.
 @MainActor
 public final class DragInteractionManager {
 
@@ -16,10 +15,10 @@ public final class DragInteractionManager {
 
     private var monitors: [Any] = []
     private var downLocation: CGPoint?     // AppKit (bottom-left) global coords
-    private var didDrag = false
+    private var dragging = false
 
     /// Minimum cursor travel (points) before a press counts as a drag.
-    private let dragThreshold: CGFloat = 12
+    private let dragThreshold: CGFloat = 8
 
     public init(engine: TilingEngine, settings: AppSettings) {
         self.engine = engine
@@ -27,16 +26,14 @@ public final class DragInteractionManager {
     }
 
     public func start() {
-        // Global monitors observe events destined for *other* apps — exactly the window drags we
-        // care about. (Tessera has no windows of its own, so a local monitor isn't needed.)
-        let down = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            MainActor.assumeIsolated { self?.handleDown(event) }
+        let down = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleDown() }
         }
-        let drag = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] event in
-            MainActor.assumeIsolated { self?.handleDragged(event) }
+        let drag = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDragged]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleDragged() }
         }
-        let up = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
-            MainActor.assumeIsolated { self?.handleUp(event) }
+        let up = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.handleUp() }
         }
         monitors = [down, drag, up].compactMap { $0 }
     }
@@ -46,30 +43,32 @@ public final class DragInteractionManager {
         monitors.removeAll()
     }
 
+    private var primaryHeight: CGFloat { CoordinateConverter.primaryDisplayHeight() }
+    private func cg(_ appKit: CGPoint) -> CGPoint {
+        CoordinateConverter.appKitToCG(point: appKit, primaryHeight: primaryHeight)
+    }
+
     // MARK: - Event handling
 
-    private func handleDown(_ event: NSEvent) {
+    private func handleDown() {
         downLocation = NSEvent.mouseLocation
-        didDrag = false
+        dragging = false
     }
 
-    private func handleDragged(_ event: NSEvent) {
-        guard let down = downLocation else { return }
+    private func handleDragged() {
+        guard settings.snapEnabled, let down = downLocation else { return }
         let now = NSEvent.mouseLocation
-        if abs(now.x - down.x) > dragThreshold || abs(now.y - down.y) > dragThreshold {
-            didDrag = true
+        if !dragging {
+            guard abs(now.x - down.x) > dragThreshold || abs(now.y - down.y) > dragThreshold else { return }
+            dragging = true
+            engine.dragBegan(atCG: cg(down))
         }
+        engine.dragMoved(toCG: cg(now))
     }
 
-    private func handleUp(_ event: NSEvent) {
-        defer { downLocation = nil; didDrag = false }
-        guard settings.snapEnabled, didDrag, let down = downLocation else { return }
-        let up = NSEvent.mouseLocation
-
-        // Convert both endpoints from AppKit (bottom-left) to CG (top-left) to match grid frames.
-        let h = CoordinateConverter.primaryDisplayHeight()
-        let fromCG = CoordinateConverter.appKitToCG(point: down, primaryHeight: h)
-        let toCG = CoordinateConverter.appKitToCG(point: up, primaryHeight: h)
-        engine.attemptSwap(fromCG: fromCG, toCG: toCG)
+    private func handleUp() {
+        defer { downLocation = nil; dragging = false }
+        guard dragging else { return }
+        engine.dragEnded(atCG: cg(NSEvent.mouseLocation))
     }
 }

@@ -278,6 +278,51 @@ do {
     check(withNew.categoryId(bundleId: nil, appName: "Miro") == profile.id, "an example app classifies to the new category")
 }
 
+// MARK: - Drag-to-snap geometry
+
+do {
+    let area = CGRect(x: 0, y: 0, width: 2000, height: 1000)
+    // A window occupies the left half; the open area is the right half.
+    let occupied = [CGRect(x: 0, y: 0, width: 1000, height: 1000)]
+    let empty = Snap.largestEmptyRect(containing: CGPoint(x: 1500, y: 500), in: area, avoiding: occupied)
+    check(empty != nil, "finds an empty rect in the open area")
+    if let e = empty {
+        check(e.minX >= 1000 - 0.5 && abs(e.maxX - 2000) < 0.5, "empty rect is the open right region")
+    }
+    // Pointer over the occupied window → no snap (caller treats as swap).
+    check(Snap.largestEmptyRect(containing: CGPoint(x: 500, y: 500), in: area, avoiding: occupied) == nil,
+          "no snap rect when pointer is over an occupied window")
+}
+
+do {
+    // Two windows border the open region. A greedy shrink keeps the wider left strip first, then
+    // the second window forces it to trim again → 400k. The true maximum is the full-width top
+    // strip → 500k. This guards against that regression.
+    let area = CGRect(x: 0, y: 0, width: 1000, height: 1000)
+    let a = CGRect(x: 500, y: 500, width: 500, height: 500)
+    let b = CGRect(x: 0, y: 800, width: 500, height: 200)
+    let e = Snap.largestEmptyRect(containing: CGPoint(x: 200, y: 200), in: area, avoiding: [a, b])
+    check(e != nil, "finds an empty rect with two bordering windows")
+    if let e {
+        check(abs(e.width * e.height - 500_000) < 1.0,
+              "picks the true maximal empty rect, not a greedy sub-rect")
+    }
+}
+
+do {
+    // Edge bias halves the empty rect toward the cursor; a corner gives a quarter.
+    let e = CGRect(x: 0, y: 0, width: 1000, height: 800)
+    let left = Snap.biased(e, toward: CGPoint(x: 50, y: 400))
+    check(abs(left.width - 500) < 0.5 && abs(left.minX - 0) < 0.5, "left bias → left half")
+    let right = Snap.biased(e, toward: CGPoint(x: 950, y: 400))
+    check(abs(right.minX - 500) < 0.5 && abs(right.width - 500) < 0.5, "right bias → right half")
+    let center = Snap.biased(e, toward: CGPoint(x: 500, y: 400))
+    check(abs(center.width - 1000) < 0.5 && abs(center.height - 800) < 0.5, "center → whole rect")
+    let corner = Snap.biased(e, toward: CGPoint(x: 950, y: 750))
+    check(abs(corner.width - 500) < 0.5 && abs(corner.height - 400) < 0.5 && abs(corner.minX - 500) < 0.5 && abs(corner.minY - 400) < 0.5,
+          "bottom-right corner → bottom-right quarter")
+}
+
 // MARK: - Too many windows: recency-priority + on-screen guarantee
 
 do {

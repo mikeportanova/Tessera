@@ -135,25 +135,87 @@ public final class TilingEngine: ObservableObject {
         Task { await retile() }
     }
 
-    // MARK: - Swap (drag one tile onto another)
+    // MARK: - Drag-to-snap (Magnet-style) + swap
 
-    /// Swap the tiles under two CG (top-left) points. Returns true if a swap happened.
-    ///
-    /// The drag must *start on the source window's title bar* — that's how you grab a window to move
-    /// it. A drag that starts in a window's content area (e.g. dragging a file out of it) is not a
-    /// window move and must never trigger a swap, even if it ends over another tile.
-    @discardableResult
-    public func attemptSwap(fromCG: CGPoint, toCG: CGPoint) -> Bool {
-        guard let i = Reflow.indexOfTile(titleBarContaining: fromCG, in: grid),
-              let j = Reflow.indexOfTile(containing: toCG, in: grid),
-              i != j else { return false }
+    private enum DragProposal { case snap(CGRect); case swap(targetIndex: Int) }
+    private let snapOverlay = SnapOverlay()
+    private var draggedWindow: AXWindow?
+    private var draggedGridIndex: Int?
+    private var dragProposal: DragProposal?
 
-        grid = Reflow.swapped(grid, i, j)
-        applyAndSuppress {
-            applier.applyGrid([grid[i], grid[j]])
+    /// A window drag started. We only engage when the grab is on the window's title bar (so a file
+    /// drag from the content area doesn't move/snap the window).
+    public func dragBegan(atCG point: CGPoint) {
+        draggedWindow = nil; draggedGridIndex = nil; dragProposal = nil
+        guard let win = AXWindow.window(atCG: point), let frame = win.frame else { return }
+        guard point.y <= frame.minY + Reflow.titleBarGrabHeight else { return }   // title-bar grab only
+        draggedWindow = win
+        draggedGridIndex = grid.firstIndex { CFEqual($0.handle.element, win.element) }
+    }
+
+    /// The pointer moved mid-drag: preview where the window will land (swap target or snap rect).
+    public func dragMoved(toCG point: CGPoint) {
+        guard draggedWindow != nil else { return }
+        guard let display = DisplayProvider.display(containing: CGRect(x: point.x, y: point.y, width: 1, height: 1)) else {
+            snapOverlay.hide(); dragProposal = nil; return
         }
-        status = .applied(movedWindows: 2)
-        return true
+
+        // Dropping one tile onto another (both managed) swaps them.
+        if draggedGridIndex != nil,
+           let target = grid.firstIndex(where: { $0.target.contains(point) }), target != draggedGridIndex {
+            dragProposal = .swap(targetIndex: target)
+            snapOverlay.show(cgFrame: grid[target].target)
+            return
+        }
+
+        // Otherwise snap into the open area: largest empty rect, biased toward the pointer, inset for the gap.
+        let occupied = grid.enumerated().filter { $0.offset != draggedGridIndex }.map { $0.element.target }
+        if let empty = Snap.largestEmptyRect(containing: point, in: display.visibleFrame, avoiding: occupied) {
+            let biased = Snap.biased(empty, toward: point)
+            let g = CGFloat(settings.gap)
+            let inset = biased.insetBy(dx: g, dy: g)
+            dragProposal = .snap(inset.width > 80 && inset.height > 80 ? inset : biased)
+            if case let .snap(frame) = dragProposal { snapOverlay.show(cgFrame: frame) }
+        } else {
+            dragProposal = nil
+            snapOverlay.hide()
+        }
+    }
+
+    /// The drag ended: apply the previewed proposal.
+    public func dragEnded(atCG point: CGPoint) {
+        snapOverlay.hide()
+        defer { draggedWindow = nil; draggedGridIndex = nil; dragProposal = nil }
+        guard let proposal = dragProposal else { return }
+        switch proposal {
+        case .swap(let target):
+            guard let from = draggedGridIndex, from != target else { return }
+            grid = Reflow.swapped(grid, from, target)
+            applyAndSuppress { applier.applyGrid([grid[from], grid[target]]) }
+            status = .applied(movedWindows: 2)
+        case .snap(let frame):
+            guard let win = draggedWindow else { return }
+            let area = DisplayProvider.display(containing: frame)?.visibleFrame
+            applyAndSuppress {
+                _ = win.setFrame(frame)
+                if let area, let actual = win.frame,
+                   let fixed = WindowApplier.onScreenOrigin(for: actual, in: area), fixed != actual.origin {
+                    win.setPosition(fixed)
+                }
+            }
+            upsertGrid(element: win.element, frame: frame)
+            status = .applied(movedWindows: 1)
+        }
+    }
+
+    /// Insert or update the grid tile for a window placed by snapping, classifying it by its app.
+    private func upsertGrid(element: AXUIElement, frame: CGRect) {
+        let app = AXWindow(element).pid.flatMap { NSRunningApplication(processIdentifier: $0) }
+        let catId = categoryStore.categoryId(bundleId: app?.bundleIdentifier, appName: app?.localizedName ?? "")
+        let tile = GridTile(handle: AXWindowHandle(element), bundleId: app?.bundleIdentifier,
+                            categoryId: catId, appName: app?.localizedName ?? "", target: frame)
+        if let i = grid.firstIndex(where: { CFEqual($0.handle.element, element) }) { grid[i] = tile }
+        else { grid.append(tile) }
     }
 
     // MARK: - Resize reflow + learning

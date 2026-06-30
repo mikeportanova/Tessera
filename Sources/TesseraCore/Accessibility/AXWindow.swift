@@ -12,6 +12,27 @@ public struct AXWindow {
         self.element = element
     }
 
+    /// The standard window element under a CG (top-left) screen point, if any — used to find the
+    /// window being dragged. Walks from the hit element up to its containing window.
+    public static func window(atCG point: CGPoint) -> AXWindow? {
+        let system = AXUIElementCreateSystemWide()
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success,
+              let element = hit else { return nil }
+        // Most elements expose their containing window via kAXWindowAttribute.
+        var win: CFTypeRef?
+        if AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &win) == .success, let win {
+            return AXWindow(win as! AXUIElement)
+        }
+        return AXWindow(element)
+    }
+
+    /// The owning process id, if available.
+    public var pid: pid_t? {
+        var p: pid_t = 0
+        return AXUIElementGetPid(element, &p) == .success ? p : nil
+    }
+
     // MARK: - Reads
 
     public var title: String {
