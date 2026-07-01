@@ -5,7 +5,7 @@ import CoreGraphics
 /// Thin wrapper over a single window's `AXUIElement`, exposing typed reads/writes of its
 /// position and size. All geometry here is in CG/AX (top-left) coordinates — the native space
 /// of `kAXPositionAttribute`.
-public struct AXWindow {
+public struct AXWindow: @unchecked Sendable {
     public let element: AXUIElement
 
     public init(_ element: AXUIElement) {

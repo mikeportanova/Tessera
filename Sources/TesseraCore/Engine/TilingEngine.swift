@@ -37,6 +37,9 @@ public final class TilingEngine: ObservableObject {
     /// live setting change like the gap should be re-applied.
     public var hasActiveLayout: Bool { !grid.isEmpty }
 
+    /// Centered "Planning layout…" HUD, shown while an AI plan is in flight.
+    private let progressOverlay = ProgressOverlay()
+
     /// Guard against overlapping planning passes.
     private var isPlanning = false
     /// Ignore geometry notifications until this instant — set after we apply frames ourselves, so
@@ -60,13 +63,15 @@ public final class TilingEngine: ObservableObject {
         guard !isPlanning else { return }
         isPlanning = true
         status = .planning
-        defer { isPlanning = false }
+        defer { isPlanning = false; progressOverlay.hide() }
 
         let catalog = categoryStore.snapshot()
         let windows = enumerator.managedWindows(catalog: catalog)
         guard !windows.isEmpty else { status = .applied(movedWindows: 0); grid = []; return }
 
         let usingAI = useAI && Keychain.hasAPIKey
+        // Only the AI path has a visible wait worth a HUD; the offline tiler is instant.
+        if usingAI { progressOverlay.show(text: "Planning layout…") }
         rateLimiter.maxPerHour = settings.maxAICallsPerHour
         let learned = dimensionMemory.snapshot()
         let displays = DisplayProvider.displays()
@@ -111,8 +116,14 @@ public final class TilingEngine: ObservableObject {
             passUsage = passUsage + outcome.usage
             if let e = outcome.error, aiError == nil { aiError = e }
 
-            applyAndSuppress { totalMoved += applier.apply(plan: outcome.plan, to: group, clampTo: display.visibleFrame) }
-            newGrid.append(contentsOf: gridTiles(from: outcome.plan, windows: group))
+            let tiles = gridTiles(from: outcome.plan, windows: group)
+            newGrid.append(contentsOf: tiles)
+            suppressGeometry(for: WindowAnimator.duration)
+            await WindowAnimator.animate(
+                tiles.map { WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target) },
+                clampTo: display.visibleFrame
+            )
+            totalMoved += tiles.count
         }
 
         // Record the whole pass as one "tiling" usage event (sum across displays).
@@ -191,20 +202,23 @@ public final class TilingEngine: ObservableObject {
         case .swap(let target):
             guard let from = draggedGridIndex, from != target else { return }
             grid = Reflow.swapped(grid, from, target)
-            applyAndSuppress { applier.applyGrid([grid[from], grid[target]]) }
-            status = .applied(movedWindows: 2)
+            let moves = [grid[from], grid[target]].map {
+                WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target)
+            }
+            suppressGeometry(for: WindowAnimator.duration)
+            Task { @MainActor in
+                await WindowAnimator.animate(moves, clampTo: nil)
+                status = .applied(movedWindows: 2)
+            }
         case .snap(let frame):
             guard let win = draggedWindow else { return }
             let area = DisplayProvider.display(containing: frame)?.visibleFrame
-            applyAndSuppress {
-                _ = win.setFrame(frame)
-                if let area, let actual = win.frame,
-                   let fixed = WindowApplier.onScreenOrigin(for: actual, in: area), fixed != actual.origin {
-                    win.setPosition(fixed)
-                }
-            }
+            suppressGeometry(for: WindowAnimator.duration)
             upsertGrid(element: win.element, frame: frame)
-            status = .applied(movedWindows: 1)
+            Task { @MainActor in
+                await WindowAnimator.animate([WindowAnimator.Move(window: win, target: frame)], clampTo: area)
+                status = .applied(movedWindows: 1)
+            }
         }
     }
 
@@ -289,9 +303,16 @@ public final class TilingEngine: ObservableObject {
         let windows = enumerator.managedWindows(catalog: categoryStore.snapshot())
         let tiles = store.resolveTiles(for: layout, windows: windows)
         let plan = LayoutPlan(displaySignature: layout.displaySignature, tiles: tiles)
-        applyAndSuppress { _ = applier.apply(plan: plan, to: windows) }
-        grid = gridTiles(from: plan, windows: windows)
-        status = .applied(movedWindows: tiles.count)
+        let gridTilesForPlan = gridTiles(from: plan, windows: windows)
+        grid = gridTilesForPlan
+        suppressGeometry(for: WindowAnimator.duration)
+        Task { @MainActor in
+            await WindowAnimator.animate(
+                gridTilesForPlan.map { WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target) },
+                clampTo: nil
+            )
+            status = .applied(movedWindows: tiles.count)
+        }
     }
 
     public func deleteLayout(name: String) {
@@ -315,10 +336,15 @@ public final class TilingEngine: ObservableObject {
     /// resulting AX move/resize notifications aren't mistaken for user edits.
     private func applyAndSuppress(_ body: () -> Void) {
         body()
-        // Long enough for the AX move/resize notifications our own applies generate to drain
-        // (they arrive within tens of ms), short enough that the user's *next* resize is picked up
-        // promptly rather than being swallowed.
-        suppressGeometryUntil = Date().addingTimeInterval(0.35)
+        suppressGeometry()
+    }
+
+    /// Ignore geometry notifications for a beat (plus any animation time) so the AX move/resize
+    /// notifications our own applies generate aren't mistaken for user edits. The 0.35s tail is long
+    /// enough for those to drain, short enough that the user's *next* resize is still picked up
+    /// promptly. Pass `extra` to cover an in-flight slide animation.
+    private func suppressGeometry(for extra: TimeInterval = 0) {
+        suppressGeometryUntil = Date().addingTimeInterval(0.35 + extra)
     }
 
     /// Build grid tiles by joining a plan (keyed by window UUID) back to its windows' AX handles.

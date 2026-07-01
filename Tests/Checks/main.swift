@@ -192,6 +192,32 @@ do {
 }
 
 do {
+    // 2×2 grid, 8pt gaps on a 1008×1008 area. Drag the top-left window's bottom-right corner:
+    // widen +100 and grow +80 taller. The vertical divider (x≈500) and horizontal divider (y≈500)
+    // both move, so ALL three neighbors — including the diagonal (bottom-right) — must resize.
+    let gap: CGFloat = 8
+    let tl = makeTile(CGRect(x: 0,   y: 0,   width: 500, height: 500))   // 0 resized
+    let tr = makeTile(CGRect(x: 508, y: 0,   width: 500, height: 500))   // 1 right
+    let bl = makeTile(CGRect(x: 0,   y: 508, width: 500, height: 500))   // 2 below
+    let br = makeTile(CGRect(x: 508, y: 508, width: 500, height: 500))   // 3 diagonal
+    let oldFrame = tl.target
+    let newFrame = CGRect(x: 0, y: 0, width: 600, height: 580)           // divider → x=600, y=580
+    let out = Reflow.afterResize(tiles: [tl, tr, bl, br], resizedIndex: 0, oldFrame: oldFrame, newFrame: newFrame, gap: gap)
+
+    // Right neighbor: left edge follows the vertical divider AND bottom edge follows the horizontal one.
+    check(approxEqual(out[1].target.minX, 608), "top-right left edge tracks the vertical divider")
+    check(approxEqual(out[1].target.maxY, 580), "top-right bottom edge tracks the horizontal divider")
+    // Below neighbor: top edge follows the horizontal divider AND right edge follows the vertical one.
+    check(approxEqual(out[2].target.minY, 588), "bottom-left top edge tracks the horizontal divider")
+    check(approxEqual(out[2].target.maxX, 600), "bottom-left right edge tracks the vertical divider")
+    // Diagonal neighbor: BOTH its left and top edges move — the bug that prompted this.
+    check(approxEqual(out[3].target.minX, 608), "diagonal left edge tracks the vertical divider")
+    check(approxEqual(out[3].target.minY, 588), "diagonal top edge tracks the horizontal divider")
+    check(approxEqual(out[3].target.maxX, 1008) && approxEqual(out[3].target.maxY, 1008),
+          "diagonal keeps its outer corner anchored")
+}
+
+do {
     let tiles = [
         makeTile(CGRect(x: 0, y: 0, width: 100, height: 100)),
         makeTile(CGRect(x: 200, y: 0, width: 100, height: 100)),

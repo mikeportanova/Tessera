@@ -39,9 +39,17 @@ public enum Reflow {
         return out
     }
 
-    /// Given a window resized from `oldFrame` to `newFrame`, adjust the direct neighbors that shared
-    /// the moved edge so the layout stays gapless and non-overlapping. Returns updated targets
-    /// (including the resized tile, now `newFrame`). Only direct neighbors are touched.
+    /// Given a window resized from `oldFrame` to `newFrame`, adjust its neighbors so the layout stays
+    /// gapless and non-overlapping. Returns updated targets (including the resized tile, now
+    /// `newFrame`).
+    ///
+    /// Each moved edge of the resized window is treated as a **divider**, and every tile whose own
+    /// edge lines up with that divider tracks it — both the tile on the *opposite* side (its facing
+    /// edge sits one gap away) and any tile on the *same* side (its matching edge coincides, e.g. a
+    /// tile stacked in the same column). Because a tile can border two moved dividers at once, this
+    /// also resizes the **diagonal** tile in a grid — dragging a window's corner keeps the whole grid
+    /// clean rather than leaving the diagonal behind. Alignment is the guard: only tiles whose edges
+    /// actually coincide with a moved divider are touched, so unrelated tiles stay put.
     public static func afterResize(
         tiles: [GridTile],
         resizedIndex: Int,
@@ -62,34 +70,43 @@ public enum Reflow {
         for k in out.indices where k != resizedIndex {
             var f = out[k].target
 
-            // Neighbor immediately to the RIGHT of the resized window: its left edge tracked the
-            // resized window's right edge. Move its left edge, keep its right edge fixed.
-            if abs(dRight) > 0.5,
-               approxEqual(f.minX, oldFrame.maxX + gap),
-               verticallyOverlapping(f, oldFrame) {
-                let newMinX = newFrame.maxX + gap
-                f = CGRect(x: newMinX, y: f.minY, width: max(minSize.width, f.maxX - newMinX), height: f.height)
+            // Vertical divider at the resized window's RIGHT edge.
+            if abs(dRight) > 0.5 {
+                if approxEqual(f.minX, oldFrame.maxX + gap) {          // tile to the right → move its left edge
+                    let newMinX = newFrame.maxX + gap
+                    f = CGRect(x: newMinX, y: f.minY, width: max(minSize.width, f.maxX - newMinX), height: f.height)
+                } else if approxEqual(f.maxX, oldFrame.maxX) {         // tile sharing that right edge → move its right edge
+                    f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newFrame.maxX - f.minX), height: f.height)
+                }
             }
-            // Neighbor to the LEFT: keep its left edge, move its right edge to the resized left edge.
-            if abs(dLeft) > 0.5,
-               approxEqual(f.maxX, oldFrame.minX - gap),
-               verticallyOverlapping(f, oldFrame) {
-                let newMaxX = newFrame.minX - gap
-                f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newMaxX - f.minX), height: f.height)
+            // Vertical divider at the resized window's LEFT edge.
+            if abs(dLeft) > 0.5 {
+                if approxEqual(f.maxX, oldFrame.minX - gap) {          // tile to the left → move its right edge
+                    let newMaxX = newFrame.minX - gap
+                    f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newMaxX - f.minX), height: f.height)
+                } else if approxEqual(f.minX, oldFrame.minX) {         // tile sharing that left edge → move its left edge
+                    let newMinX = newFrame.minX
+                    f = CGRect(x: newMinX, y: f.minY, width: max(minSize.width, f.maxX - newMinX), height: f.height)
+                }
             }
-            // Neighbor BELOW: move its top edge, keep its bottom edge.
-            if abs(dBottom) > 0.5,
-               approxEqual(f.minY, oldFrame.maxY + gap),
-               horizontallyOverlapping(f, oldFrame) {
-                let newMinY = newFrame.maxY + gap
-                f = CGRect(x: f.minX, y: newMinY, width: f.width, height: max(minSize.height, f.maxY - newMinY))
+            // Horizontal divider at the resized window's BOTTOM edge.
+            if abs(dBottom) > 0.5 {
+                if approxEqual(f.minY, oldFrame.maxY + gap) {          // tile below → move its top edge
+                    let newMinY = newFrame.maxY + gap
+                    f = CGRect(x: f.minX, y: newMinY, width: f.width, height: max(minSize.height, f.maxY - newMinY))
+                } else if approxEqual(f.maxY, oldFrame.maxY) {         // tile sharing that bottom edge → move its bottom edge
+                    f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newFrame.maxY - f.minY))
+                }
             }
-            // Neighbor ABOVE: keep its top edge, move its bottom edge.
-            if abs(dTop) > 0.5,
-               approxEqual(f.maxY, oldFrame.minY - gap),
-               horizontallyOverlapping(f, oldFrame) {
-                let newMaxY = newFrame.minY - gap
-                f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newMaxY - f.minY))
+            // Horizontal divider at the resized window's TOP edge.
+            if abs(dTop) > 0.5 {
+                if approxEqual(f.maxY, oldFrame.minY - gap) {          // tile above → move its bottom edge
+                    let newMaxY = newFrame.minY - gap
+                    f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newMaxY - f.minY))
+                } else if approxEqual(f.minY, oldFrame.minY) {         // tile sharing that top edge → move its top edge
+                    let newMinY = newFrame.minY
+                    f = CGRect(x: f.minX, y: newMinY, width: f.width, height: max(minSize.height, f.maxY - newMinY))
+                }
             }
 
             out[k].target = f
@@ -119,13 +136,6 @@ public enum Reflow {
     // MARK: - Helpers
 
     private static func approxEqual(_ a: CGFloat, _ b: CGFloat) -> Bool { abs(a - b) <= tolerance }
-
-    private static func verticallyOverlapping(_ a: CGRect, _ b: CGRect) -> Bool {
-        a.minY < b.maxY - tolerance && a.maxY > b.minY + tolerance
-    }
-    private static func horizontallyOverlapping(_ a: CGRect, _ b: CGRect) -> Bool {
-        a.minX < b.maxX - tolerance && a.maxX > b.minX + tolerance
-    }
 }
 
 /// Pure geometry for Magnet-style drag-to-snap: the empty rectangle a window would fill at a point,
