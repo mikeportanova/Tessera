@@ -21,7 +21,7 @@ if gh release view "$TAG" >/dev/null 2>&1; then
     exit 1
 fi
 
-echo "▸ Creating release $TAG with $DMG…"
+echo "▸ Creating release $TAG with ${DMG}…"
 gh release create "$TAG" "$DMG" \
     --title "Tessera $VERSION" \
     --notes "${NOTES:-Tessera $VERSION — notarized DMG attached. In-app: menu → Update Now.}"
