@@ -232,10 +232,14 @@ public enum Snap {
         rect.height > 0 && rect.width / rect.height <= maxWidthToHeightRatio
     }
 
-    /// Whether a snap zone is worth proposing within `area`. A *short* and super-wide sliver is not —
-    /// but a full-height wide zone (e.g. maximizing on a genuine ultrawide display) always is, so the
+    /// Whether a snap zone is worth proposing within `area`.
+    ///
+    /// Two filters: the zone must be at least as big as the smallest window Tessera manages (no point
+    /// offering a slot no tileable window fits), and a *short* super-wide sliver is rejected — but a
+    /// full-height wide zone (e.g. maximizing on a genuine ultrawide display) always passes, so the
     /// aspect guard only applies to zones that are also short (well under the display's height).
-    public static func isProposable(_ rect: CGRect, in area: CGRect) -> Bool {
+    public static func isProposable(_ rect: CGRect, in area: CGRect, minSize: CGSize = AXWindow.minTileableSize) -> Bool {
+        guard rect.width >= minSize.width, rect.height >= minSize.height else { return false }
         let isShort = rect.height < area.height * 0.6
         return !isShort || isReasonablyShaped(rect)
     }

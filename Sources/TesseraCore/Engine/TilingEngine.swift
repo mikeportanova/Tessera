@@ -192,7 +192,10 @@ public final class TilingEngine: ObservableObject {
         // Otherwise snap into the open area: largest empty rect, biased toward the pointer, inset for the gap.
         let occupied = grid.enumerated().filter { $0.offset != draggedGridIndex }.map { $0.element.target }
         if let empty = Snap.largestEmptyRect(containing: point, in: display.visibleFrame, avoiding: occupied) {
-            let biased = Snap.biased(empty, toward: point)
+            var biased = Snap.biased(empty, toward: point)
+            // If halving toward an edge left a zone too small to use, offer the whole area instead
+            // of nothing — a small gap near an edge should still be snappable.
+            if !Snap.isProposable(biased, in: display.visibleFrame) { biased = empty }
             // Never propose a too-wide, partial-height rectangle (looks absurd on wide displays).
             let capped = Snap.capWidth(biased, in: display.visibleFrame, toward: point)
             let g = CGFloat(settings.gap)
@@ -228,6 +231,7 @@ public final class TilingEngine: ObservableObject {
         case .swap(let target):
             guard grid.indices.contains(target) else { return }
             let moves: [WindowAnimator.Move]
+            var clampArea: CGRect?
             if let from = draggedGridIndex {
                 // Both windows are tiled → straight exchange of their slots.
                 guard from != target else { return }
@@ -240,24 +244,18 @@ public final class TilingEngine: ObservableObject {
                 // and that tile's window moves into the dragged window's old frame. Both end up managed.
                 let targetFrame = grid[target].target
                 let displaced = AXWindow(grid[target].handle.element)
-                let vf = DisplayProvider.display(containing: targetFrame)?.visibleFrame
-                let displacedFrame = tidyDisplacedFrame(origin, in: vf)
+                clampArea = DisplayProvider.display(containing: targetFrame)?.visibleFrame
+                let displacedFrame = tidyDisplacedFrame(origin, in: clampArea)
                 grid[target] = makeGridTile(for: win.element, frame: targetFrame)
                 upsertGrid(element: displaced.element, frame: displacedFrame)
                 moves = [WindowAnimator.Move(window: win, target: targetFrame),
                          WindowAnimator.Move(window: displaced, target: displacedFrame)]
-                suppressGeometry(for: WindowAnimator.duration)
-                Task { @MainActor in
-                    await WindowAnimator.animate(moves, clampTo: vf)
-                    status = .applied(movedWindows: moves.count)
-                }
-                return
             } else {
                 return
             }
             suppressGeometry(for: WindowAnimator.duration)
             Task { @MainActor in
-                await WindowAnimator.animate(moves, clampTo: nil)
+                await WindowAnimator.animate(moves, clampTo: clampArea)
                 status = .applied(movedWindows: moves.count)
             }
         case .snap(let frame):

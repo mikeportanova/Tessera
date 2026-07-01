@@ -28,11 +28,14 @@ public enum WindowAnimator {
 
     /// Animate the moves to completion. Windows whose current frame can't be read are skipped.
     ///
-    /// A fixed per-frame loop at ~60fps: every frame applies a fresh position/size to every window and
-    /// then yields, so the WindowServer renders each one. Pushing past 60fps backfires — apps repaint
-    /// on their own schedule and the extra AX sets just coalesce, so intermediate frames vanish. The
-    /// smootherstep easing gives a gentle start and stop; the frame count is derived from the duration
-    /// so the pacing stays ~60fps regardless of how long the slide is.
+    /// A per-frame loop at ~60fps: every frame applies a fresh position/size to every moving window
+    /// and then yields, so the WindowServer renders each one. Pushing past 60fps backfires — apps
+    /// repaint on their own schedule and the extra AX sets just coalesce, so intermediate frames
+    /// vanish. Progress is computed from the **wall clock**, not a step index: `Task.sleep` overshoots
+    /// and the AX sets themselves cost real milliseconds (especially for heavy apps × many windows),
+    /// so a step-indexed loop stretches the slide and wobbles its velocity — a slow frame should skip
+    /// ahead, keeping the eased motion even and the total duration honest. Windows already at their
+    /// target are left out of the interpolation entirely (no AX churn for windows that aren't moving).
     public static func animate(_ moves: [Move], clampTo area: CGRect?) async {
         let items = moves.compactMap { m -> (AXWindow, CGRect, CGRect)? in
             guard let start = m.window.frame else { return nil }
@@ -40,16 +43,21 @@ public enum WindowAnimator {
         }
         guard !items.isEmpty else { return }
 
-        if !reduceMotion {
-            let frames = max(2, Int((duration * 60).rounded()))
-            let stepNanos = UInt64(duration / Double(frames) * 1_000_000_000)
-            for step in 1..<frames {
-                let t = smootherStep(Double(step) / Double(frames))
-                for (win, start, target) in items {
+        // Only windows that actually have somewhere to go participate in the slide.
+        let moving = items.filter { !approxSameFrame($0.1, $0.2) }
+
+        if !reduceMotion && !moving.isEmpty {
+            let frameNanos: UInt64 = 16_666_667   // ~60fps
+            let startTime = Date()
+            while true {
+                let raw = min(1.0, Date().timeIntervalSince(startTime) / duration)
+                if raw >= 1.0 { break }            // t = 1 is the exact final placement below
+                let t = smootherStep(raw)
+                for (win, start, target) in moving {
                     win.setSize(lerpSize(start.size, target.size, t))
                     win.setPosition(lerpPoint(start.origin, target.origin, t))
                 }
-                try? await Task.sleep(nanoseconds: stepNanos)
+                try? await Task.sleep(nanoseconds: frameNanos)
             }
         }
 
@@ -77,5 +85,10 @@ public enum WindowAnimator {
 
     static func lerpSize(_ a: CGSize, _ b: CGSize, _ t: Double) -> CGSize {
         CGSize(width: a.width + (b.width - a.width) * t, height: a.height + (b.height - a.height) * t)
+    }
+
+    private static func approxSameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
+        abs(a.minX - b.minX) < 1 && abs(a.minY - b.minY) < 1
+            && abs(a.width - b.width) < 1 && abs(a.height - b.height) < 1
     }
 }

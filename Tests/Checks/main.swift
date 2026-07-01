@@ -352,6 +352,15 @@ do {
           "a short, super-wide band is not proposable")
     check(Snap.isProposable(CGRect(x: 0, y: 0, width: 2600, height: 1040), in: CGRect(x: 0, y: 0, width: 5200, height: 2180)),
           "a half-height, half-width zone is proposable")
+
+    // Zones smaller than the smallest tileable window are never proposed.
+    let big = CGRect(x: 0, y: 0, width: 5200, height: 2180)
+    check(!Snap.isProposable(CGRect(x: 0, y: 0, width: 200, height: 800), in: big),
+          "a zone narrower than minTileableSize is not proposable")
+    check(!Snap.isProposable(CGRect(x: 0, y: 0, width: 800, height: 120), in: big),
+          "a zone shorter than minTileableSize is not proposable")
+    check(Snap.isProposable(CGRect(x: 0, y: 0, width: 240, height: 2180), in: big),
+          "a min-width full-height column is proposable")
 }
 
 do {
