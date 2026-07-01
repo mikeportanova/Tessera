@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Combine
+import ServiceManagement
 import TesseraCore
 
 /// Root object that owns Tessera's long-lived collaborators and wires up lifecycle. Created once by
@@ -15,12 +16,28 @@ public final class AppModel: ObservableObject {
     public let categoryStore: CategoryStore
     public let usageTracker: UsageTracker
     public let pricingStore: PricingStore
+    public let appRules: AppRulesStore
+    public let updateChecker: UpdateChecker
     private let autoArrange: AutoArrangeCoordinator
     private let dragInteractions: DragInteractionManager
     private let hotKey = HotKeyManager()
     private var cancellables: Set<AnyCancellable> = []
 
     @Published public var savedLayoutNames: [String] = []
+
+    /// Mirrors `SMAppService.mainApp` so the Preferences toggle can bind to it.
+    @Published public var launchAtLogin: Bool = false {
+        didSet {
+            guard oldValue != launchAtLogin else { return }
+            do {
+                if launchAtLogin { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
+            } catch {
+                NSLog("[Tessera] launch-at-login change failed: \(error.localizedDescription)")
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+            }
+        }
+    }
 
     public init() {
         let settings = AppSettings()
@@ -30,7 +47,8 @@ public final class AppModel: ObservableObject {
         let categoryStore = CategoryStore()
         let usageTracker = UsageTracker()
         let pricingStore = PricingStore()
-        let engine = TilingEngine(settings: settings, rateLimiter: rateLimiter, dimensionMemory: dimensionMemory, categoryStore: categoryStore, usageTracker: usageTracker)
+        let appRules = AppRulesStore()
+        let engine = TilingEngine(settings: settings, rateLimiter: rateLimiter, dimensionMemory: dimensionMemory, categoryStore: categoryStore, usageTracker: usageTracker, appRules: appRules)
         self.settings = settings
         self.permissions = permissions
         self.dimensionMemory = dimensionMemory
@@ -38,10 +56,13 @@ public final class AppModel: ObservableObject {
         self.categoryStore = categoryStore
         self.usageTracker = usageTracker
         self.pricingStore = pricingStore
+        self.appRules = appRules
+        self.updateChecker = UpdateChecker()
         self.engine = engine
         self.autoArrange = AutoArrangeCoordinator(engine: engine, settings: settings)
         self.dragInteractions = DragInteractionManager(engine: engine, settings: settings)
         categoryStore.usageTracker = usageTracker
+        self.launchAtLogin = SMAppService.mainApp.status == .enabled
     }
 
     /// Called once at launch.
@@ -57,11 +78,25 @@ public final class AppModel: ObservableObject {
         autoArrange.start()
         dragInteractions.start()
         pricingStore.refreshIfStale()   // weekly token-pricing refresh
+        updateChecker.checkIfStale()    // weekly release check
 
-        // Global "Tile Now" hotkey — re-registers whenever the user picks a different shortcut.
-        hotKey.onPressed = { [weak self] in self?.tileNow() }
+        // Global hotkeys: Tile Now, Magnet-style quick snaps, and undo — re-registered whenever the
+        // user changes the tile shortcut or the quick-snap toggle.
+        hotKey.onAction = { [weak self] action in
+            guard let self else { return }
+            switch action {
+            case .tile:      self.tileNow()
+            case .leftHalf:  self.engine.quickSnap(.leftHalf)
+            case .rightHalf: self.engine.quickSnap(.rightHalf)
+            case .maximize:  self.engine.quickSnap(.maximize)
+            case .undo:      self.engine.undoLastLayout()
+            }
+        }
         settings.$tileShortcut
-            .sink { [weak self] shortcut in self?.hotKey.apply(shortcut) }
+            .combineLatest(settings.$quickSnapShortcuts)
+            .sink { [weak self] shortcut, quickSnap in
+                self?.hotKey.apply(tileShortcut: shortcut, quickSnapEnabled: quickSnap)
+            }
             .store(in: &cancellables)
 
         // Live gap: dragging the gap slider re-applies the current layout immediately via the fast
@@ -75,7 +110,7 @@ public final class AppModel: ObservableObject {
             .throttle(for: .milliseconds(140), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in
                 guard let self, self.engine.hasActiveLayout else { return }
-                Task { await self.engine.retile(useAI: false) }
+                Task { await self.engine.retile(useAI: false, interactive: false) }
             }
             .store(in: &cancellables)
 
@@ -96,6 +131,10 @@ public final class AppModel: ObservableObject {
 
     public func tileNow() {
         Task { await engine.retile(useAI: !settings.offlineMode) }
+    }
+
+    public func undoLastLayout() {
+        engine.undoLastLayout()
     }
 
     public func saveLayout(named name: String) {

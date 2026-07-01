@@ -60,6 +60,27 @@ public final class AppSettings: ObservableObject {
         didSet { defaults.set(offlineMode, forKey: Keys.offlineMode) }
     }
 
+    /// What the user is focused on — fed to the LLM and the offline tiler to bias the layout.
+    @Published public var intent: LayoutIntent {
+        didSet { defaults.set(intent.rawValue, forKey: Keys.intent) }
+    }
+
+    /// Reuse the last AI layout when the same window set is re-tiled (instant, zero tokens).
+    @Published public var reuseLayouts: Bool {
+        didSet { defaults.set(reuseLayouts, forKey: Keys.reuseLayouts) }
+    }
+
+    /// Show the proposed layout as ghost rectangles with Apply/Cancel before moving any window.
+    @Published public var previewBeforeApply: Bool {
+        didSet { defaults.set(previewBeforeApply, forKey: Keys.previewBeforeApply) }
+    }
+
+    /// Magnet-style quick-snap shortcuts for the focused window: ⌃⌥← left half, ⌃⌥→ right half,
+    /// ⌃⌥↩ maximize (plus ⌃⌥⌘Z undo, always on).
+    @Published public var quickSnapShortcuts: Bool {
+        didSet { defaults.set(quickSnapShortcuts, forKey: Keys.quickSnapShortcuts) }
+    }
+
     /// Whether an API key is present (mirrors Keychain; published for UI binding).
     @Published public var hasAPIKey: Bool
 
@@ -73,6 +94,10 @@ public final class AppSettings: ObservableObject {
         self.snapEnabled = defaults.object(forKey: Keys.snapEnabled) as? Bool ?? true
         self.tileShortcut = TileShortcut(rawValue: defaults.string(forKey: Keys.tileShortcut) ?? "") ?? .ctrlOptCmdT
         self.offlineMode = defaults.object(forKey: Keys.offlineMode) as? Bool ?? false
+        self.intent = LayoutIntent(rawValue: defaults.string(forKey: Keys.intent) ?? "") ?? .automatic
+        self.reuseLayouts = defaults.object(forKey: Keys.reuseLayouts) as? Bool ?? true
+        self.previewBeforeApply = defaults.object(forKey: Keys.previewBeforeApply) as? Bool ?? false
+        self.quickSnapShortcuts = defaults.object(forKey: Keys.quickSnapShortcuts) as? Bool ?? true
         self.hasAPIKey = Keychain.hasAPIKey
     }
 
@@ -90,5 +115,9 @@ public final class AppSettings: ObservableObject {
         static let snapEnabled = "snapEnabled"
         static let tileShortcut = "tileShortcut"
         static let offlineMode = "offlineMode"
+        static let intent = "layoutIntent"
+        static let reuseLayouts = "reuseLayouts"
+        static let previewBeforeApply = "previewBeforeApply"
+        static let quickSnapShortcuts = "quickSnapShortcuts"
     }
 }

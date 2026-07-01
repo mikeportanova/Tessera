@@ -20,6 +20,9 @@ public final class TilingEngine: ObservableObject {
 
     @Published public private(set) var status: Status = .idle
 
+    /// Whether the last layout can be reverted with Undo.
+    @Published public private(set) var canUndo = false
+
     private let enumerator = WindowEnumerator()
     private let planner = LayoutPlanner()
     private let applier = WindowApplier()
@@ -29,6 +32,8 @@ public final class TilingEngine: ObservableObject {
     public let dimensionMemory: DimensionMemory
     public let categoryStore: CategoryStore
     public let usageTracker: UsageTracker
+    public let appRules: AppRulesStore
+    public let layoutCache = LayoutCache()
 
     /// The frames Tessera last assigned, with live AX handles — survives re-enumeration.
     private var grid: [GridTile] = []
@@ -39,6 +44,16 @@ public final class TilingEngine: ObservableObject {
 
     /// Centered "Planning layout…" HUD, shown while an AI plan is in flight.
     private let progressOverlay = ProgressOverlay()
+    /// Ghost-rectangle preview with Apply/Cancel, used when the user opts into previewing.
+    private let preview = LayoutPreview()
+
+    /// Window-set signature of the last tiling pass — the layout cache key. Nil once the window set
+    /// changes (an app opened/closed), so manual corrections only refine the entry they belong to.
+    private var lastSignature: String?
+
+    /// Frames (and grid) captured immediately before the last layout was applied. One level deep.
+    private var undoFrames: [(handle: AXWindowHandle, frame: CGRect)] = []
+    private var undoGrid: [GridTile] = []
 
     /// Guard against overlapping planning passes.
     private var isPlanning = false
@@ -46,12 +61,13 @@ public final class TilingEngine: ObservableObject {
     /// our own moves don't masquerade as user resizes.
     private var suppressGeometryUntil = Date.distantPast
 
-    public init(settings: AppSettings, rateLimiter: RateLimiter, dimensionMemory: DimensionMemory, categoryStore: CategoryStore, usageTracker: UsageTracker) {
+    public init(settings: AppSettings, rateLimiter: RateLimiter, dimensionMemory: DimensionMemory, categoryStore: CategoryStore, usageTracker: UsageTracker, appRules: AppRulesStore = AppRulesStore()) {
         self.settings = settings
         self.rateLimiter = rateLimiter
         self.dimensionMemory = dimensionMemory
         self.categoryStore = categoryStore
         self.usageTracker = usageTracker
+        self.appRules = appRules
     }
 
     // MARK: - Tile now / re-tile
@@ -59,27 +75,45 @@ public final class TilingEngine: ObservableObject {
     /// - Parameter useAI: when false (e.g. an automatic re-tile on a new window), the offline tiler
     ///   is used and the LLM is never called — keeps frequent auto-arranges fast and free. Manual
     ///   "Tile Now" / the hotkey pass true.
-    public func retile(useAI: Bool = true) async {
+    /// - Parameter interactive: false for automatic triggers (auto-arrange, live gap changes) —
+    ///   skips the optional preview so the user isn't interrupted by a prompt they didn't ask for.
+    public func retile(useAI: Bool = true, interactive: Bool = true) async {
         guard !isPlanning else { return }
         isPlanning = true
         status = .planning
         defer { isPlanning = false; progressOverlay.hide() }
 
         let catalog = categoryStore.snapshot()
-        let windows = enumerator.managedWindows(catalog: catalog)
+        let rules = appRules.snapshot()
+        var windows = enumerator.managedWindows(catalog: catalog)
+        // Per-app "float" rule: those windows overlay every layout and are never tiled.
+        windows.removeAll { rules.rule(for: $0.bundleId) == .float }
         guard !windows.isEmpty else { status = .applied(movedWindows: 0); grid = []; return }
 
         let usingAI = useAI && Keychain.hasAPIKey
-        // Only the AI path has a visible wait worth a HUD; the offline tiler is instant.
-        if usingAI { progressOverlay.show(text: "Planning layout…") }
         rateLimiter.maxPerHour = settings.maxAICallsPerHour
         let learned = dimensionMemory.snapshot()
+        let intent = settings.intent
         let displays = DisplayProvider.displays()
 
-        var newGrid: [GridTile] = []
-        var totalMoved = 0
-        var passUsage = TokenUsage.zero
-        var aiError: String?
+        let signature = LayoutCache.signature(windows: windows, displays: displays)
+        lastSignature = signature
+
+        // Layout cache: the same window set on the same displays re-applies the last AI layout
+        // instantly — zero tokens, zero latency. Manual corrections have already been folded in.
+        if usingAI, settings.reuseLayouts,
+           let cached = layoutCache.layout(for: signature),
+           let resolved = LayoutCache.resolve(cached, windows: windows) {
+            let tiles = resolved.map { r in
+                GridTile(handle: r.window.axHandle, bundleId: r.window.bundleId,
+                         categoryId: r.window.categoryId, appName: r.window.appName, target: r.frame)
+            }
+            await applyTiles(tiles, interactive: interactive)
+            return
+        }
+
+        // Only the AI path has a visible wait worth a HUD; the offline tiler is instant.
+        if usingAI { progressOverlay.show(text: "Planning layout…") }
 
         // Assign each window to the display its frame most overlaps — in one pass over the
         // already-fetched `displays`, rather than re-enumerating screens per window.
@@ -91,53 +125,187 @@ public final class TilingEngine: ObservableObject {
             if let id = best?.id { windowsByDisplay[id, default: []].append(window) }
         }
 
-        for display in displays {
-            let group = windowsByDisplay[display.id] ?? []
-            guard !group.isEmpty else { continue }
+        var newGrid: [GridTile] = []
+        var passUsage = TokenUsage.zero
+        var aiError: String?
+        var allUsedAI = true
 
-            let outcome: LayoutPlanner.Outcome
-            if usingAI {
-                // Enforce the hourly AI cap before each network-backed plan.
-                if !rateLimiter.canCall() {
-                    status = .needsApproval(used: rateLimiter.callsInLastHour, max: rateLimiter.maxPerHour)
-                    return
-                }
-                let image = await screenshotIfEnabled(for: display)
-                outcome = await planner.plan(
-                    display: display, windows: group, gap: settings.gap, model: settings.model,
-                    image: image, catalog: catalog, learned: learned
-                )
-                rateLimiter.recordCall()
-            } else {
-                // Offline: deterministic tiler, no network, no token spend.
-                let plan = FallbackTiler.plan(display: display, windows: group, gap: settings.gap, catalog: catalog, learned: learned)
-                outcome = LayoutPlanner.Outcome(plan: plan, usage: .zero, usedAI: false, error: nil)
+        if usingAI, displays.count > 1 {
+            // Multi-display: ONE request covering everything, so windows may move between displays.
+            if !rateLimiter.canCall() {
+                status = .needsApproval(used: rateLimiter.callsInLastHour, max: rateLimiter.maxPerHour)
+                return
             }
-            passUsage = passUsage + outcome.usage
-            if let e = outcome.error, aiError == nil { aiError = e }
-
-            let tiles = gridTiles(from: outcome.plan, windows: group)
-            newGrid.append(contentsOf: tiles)
-            suppressGeometry(for: WindowAnimator.duration)
-            await WindowAnimator.animate(
-                tiles.map { WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target) },
-                clampTo: display.visibleFrame
+            let outcome = await planner.planMultiDisplay(
+                displays: displays, windows: windows, gap: settings.gap, model: settings.model,
+                catalog: catalog, learned: learned, intent: intent, rules: rules
             )
-            totalMoved += tiles.count
+            rateLimiter.recordCall()
+            passUsage = outcome.usage
+            aiError = outcome.error
+            allUsedAI = outcome.usedAI
+            newGrid = gridTiles(from: outcome.plan, windows: windows)
+        } else {
+            for display in displays {
+                let group = windowsByDisplay[display.id] ?? []
+                guard !group.isEmpty else { continue }
+
+                let outcome: LayoutPlanner.Outcome
+                if usingAI {
+                    // Enforce the hourly AI cap before each network-backed plan.
+                    if !rateLimiter.canCall() {
+                        status = .needsApproval(used: rateLimiter.callsInLastHour, max: rateLimiter.maxPerHour)
+                        return
+                    }
+                    let image = await screenshotIfEnabled(for: display)
+                    outcome = await planner.plan(
+                        display: display, windows: group, gap: settings.gap, model: settings.model,
+                        image: image, catalog: catalog, learned: learned, intent: intent, rules: rules
+                    )
+                    rateLimiter.recordCall()
+                } else {
+                    // Offline: deterministic tiler, no network, no token spend.
+                    let plan = FallbackTiler.plan(display: display, windows: group, gap: settings.gap,
+                                                  catalog: catalog, learned: learned, intent: intent, rules: rules)
+                    outcome = LayoutPlanner.Outcome(plan: plan, usage: .zero, usedAI: false, error: nil)
+                }
+                passUsage = passUsage + outcome.usage
+                if let e = outcome.error, aiError == nil { aiError = e }
+                if !outcome.usedAI { allUsedAI = false }
+                newGrid.append(contentsOf: gridTiles(from: outcome.plan, windows: group))
+            }
         }
 
         // Record the whole pass as one "tiling" usage event (sum across displays).
         usageTracker.record(passUsage, model: settings.model.rawValue, kind: .tiling)
+        progressOverlay.hide()
+
+        await applyTiles(newGrid, interactive: interactive)
+
+        // Only cache layouts the AI actually produced — the offline tiler is already instant, and a
+        // fallback layout shouldn't shadow a future AI answer for this window set.
+        if usingAI, allUsedAI, aiError == nil {
+            layoutCache.store(signature: signature, entries: newGrid.map {
+                CachedLayout.Entry(appKey: LayoutCache.appKey(bundleId: $0.bundleId, appName: $0.appName), frame: $0.target)
+            })
+        }
 
         // If the AI was expected but failed, surface why (we still tiled via the fallback).
         if usingAI, let aiError {
             status = .failed("AI unavailable — used built-in tiler. \(aiError)")
-            grid = newGrid
-            return
+        }
+    }
+
+    /// Shared tail of every tiling path: optional preview gate, undo snapshot, animated apply.
+    /// Sets `grid` and `status` (unless the user cancels the preview).
+    private func applyTiles(_ tiles: [GridTile], interactive: Bool) async {
+        guard !tiles.isEmpty else { status = .applied(movedWindows: 0); grid = []; return }
+
+        if interactive, settings.previewBeforeApply {
+            progressOverlay.hide()
+            guard await preview.confirm(cgFrames: tiles.map(\.target)) else {
+                status = .idle
+                return
+            }
         }
 
-        grid = newGrid
-        status = .applied(movedWindows: totalMoved)
+        captureUndo(handles: tiles.map(\.handle))
+        let moves = tiles.map {
+            WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target,
+                                clamp: DisplayProvider.display(containing: $0.target)?.visibleFrame)
+        }
+        suppressGeometry(for: WindowAnimator.duration)
+        await WindowAnimator.animate(moves)
+        grid = tiles
+        status = .applied(movedWindows: tiles.count)
+    }
+
+    // MARK: - Undo
+
+    /// Snapshot the current frames of the windows about to move (plus the current grid), so the last
+    /// layout operation can be reverted with one keystroke.
+    private func captureUndo(handles: [AXWindowHandle]) {
+        undoFrames = handles.compactMap { h in
+            AXWindow(h.element).frame.map { (handle: h, frame: $0) }
+        }
+        undoGrid = grid
+        canUndo = !undoFrames.isEmpty
+    }
+
+    /// Revert the last tiling/snap/swap: slide every affected window back to where it was.
+    public func undoLastLayout() {
+        guard canUndo else { return }
+        let moves = undoFrames.compactMap { entry -> WindowAnimator.Move? in
+            let win = AXWindow(entry.handle.element)
+            guard win.isAlive else { return nil }
+            return WindowAnimator.Move(window: win, target: entry.frame,
+                                       clamp: DisplayProvider.display(containing: entry.frame)?.visibleFrame)
+        }
+        grid = undoGrid.filter { AXWindow($0.handle.element).isAlive }
+        undoFrames = []
+        undoGrid = []
+        canUndo = false
+        guard !moves.isEmpty else { return }
+        suppressGeometry(for: WindowAnimator.duration)
+        Task { @MainActor in
+            await WindowAnimator.animate(moves)
+            status = .applied(movedWindows: moves.count)
+        }
+    }
+
+    // MARK: - Quick snap (Magnet-style, focused window)
+
+    public enum QuickSnapAction: Sendable {
+        case leftHalf, rightHalf, maximize
+    }
+
+    /// Move the focused window to a half/maximized frame on its display. No AI, no enumeration.
+    public func quickSnap(_ action: QuickSnapAction) {
+        guard let win = focusedWindow(), let frame = win.frame,
+              let display = DisplayProvider.display(containing: frame) ?? DisplayProvider.displays().first
+        else { return }
+        let vf = display.visibleFrame
+        let g = CGFloat(settings.gap)
+        let target: CGRect
+        switch action {
+        case .leftHalf:  target = Snap.half(left: true, of: vf, gap: g)
+        case .rightHalf: target = Snap.half(left: false, of: vf, gap: g)
+        case .maximize:  target = Snap.maximized(of: vf, gap: g)
+        }
+        captureUndo(handles: [AXWindowHandle(win.element)])
+        upsertGrid(element: win.element, frame: target)
+        recordPlacement(of: win.element, frame: target, in: vf)
+        suppressGeometry(for: WindowAnimator.duration)
+        Task { @MainActor in
+            await WindowAnimator.animate([WindowAnimator.Move(window: win, target: target, clamp: vf)])
+            status = .applied(movedWindows: 1)
+        }
+    }
+
+    /// The focused window of the frontmost app (excluding Tessera itself).
+    private func focusedWindow() -> AXWindow? {
+        guard let app = NSWorkspace.shared.frontmostApplication,
+              app.bundleIdentifier != "com.fileread.Tessera" else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &ref) == .success,
+              let ref else { return nil }
+        return AXWindow(ref as! AXUIElement)
+    }
+
+    // MARK: - Grid maintenance
+
+    /// The set of open windows changed (app launched/quit, window created/destroyed): stale grid
+    /// entries are pruned immediately and the cache key from the previous pass no longer applies.
+    public func windowSetChanged() {
+        lastSignature = nil
+        pruneStaleTiles()
+    }
+
+    /// Drop grid entries whose windows have been closed, so their slots neither block snapping into
+    /// now-empty space nor offer a swap onto a window that no longer exists.
+    public func pruneStaleTiles() {
+        grid.removeAll { !AXWindow($0.handle.element).isAlive }
     }
 
     /// User approved exceeding the hourly cap → grant headroom and try again.
@@ -164,9 +332,8 @@ public final class TilingEngine: ObservableObject {
     /// doesn't move/snap the window).
     public func dragBegan(atCG point: CGPoint, window: AXWindow, originalFrame: CGRect) {
         draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil
-        // Drop grid entries for windows that have since been closed, so their stale slots neither block
-        // snapping into now-empty space nor offer a swap onto a window that no longer exists.
-        grid.removeAll { !AXWindow($0.handle.element).isAlive }
+        // Stale slots would block snapping into now-empty space or offer swaps onto dead windows.
+        pruneStaleTiles()
         guard point.y <= originalFrame.minY + Reflow.titleBarGrabHeight else { return }   // title-bar grab only
         draggedWindow = window
         draggedOriginalFrame = originalFrame
@@ -231,43 +398,80 @@ public final class TilingEngine: ObservableObject {
         case .swap(let target):
             guard grid.indices.contains(target) else { return }
             let moves: [WindowAnimator.Move]
-            var clampArea: CGRect?
             if let from = draggedGridIndex {
                 // Both windows are tiled → straight exchange of their slots.
                 guard from != target else { return }
+                captureUndo(handles: [grid[from].handle, grid[target].handle])
                 grid = Reflow.swapped(grid, from, target)
                 moves = [grid[from], grid[target]].map {
                     WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target)
                 }
+                recordGridPlacement(of: grid[from])
+                recordGridPlacement(of: grid[target])
             } else if let win = draggedWindow, let origin = draggedOriginalFrame {
                 // Dragged window is untiled (e.g. a just-opened app): it takes the target tile's slot,
                 // and that tile's window moves into the dragged window's old frame. Both end up managed.
                 let targetFrame = grid[target].target
                 let displaced = AXWindow(grid[target].handle.element)
-                clampArea = DisplayProvider.display(containing: targetFrame)?.visibleFrame
+                let clampArea = DisplayProvider.display(containing: targetFrame)?.visibleFrame
                 let displacedFrame = tidyDisplacedFrame(origin, in: clampArea)
+                captureUndo(handles: [AXWindowHandle(win.element), grid[target].handle])
                 grid[target] = makeGridTile(for: win.element, frame: targetFrame)
                 upsertGrid(element: displaced.element, frame: displacedFrame)
-                moves = [WindowAnimator.Move(window: win, target: targetFrame),
-                         WindowAnimator.Move(window: displaced, target: displacedFrame)]
+                moves = [WindowAnimator.Move(window: win, target: targetFrame, clamp: clampArea),
+                         WindowAnimator.Move(window: displaced, target: displacedFrame, clamp: clampArea)]
+                recordGridPlacement(of: grid[target])
             } else {
                 return
             }
+            updateCacheFromGrid()
             suppressGeometry(for: WindowAnimator.duration)
             Task { @MainActor in
-                await WindowAnimator.animate(moves, clampTo: clampArea)
+                await WindowAnimator.animate(moves)
                 status = .applied(movedWindows: moves.count)
             }
         case .snap(let frame):
             guard let win = draggedWindow else { return }
             let area = DisplayProvider.display(containing: frame)?.visibleFrame
+            captureUndo(handles: [AXWindowHandle(win.element)])
             suppressGeometry(for: WindowAnimator.duration)
             upsertGrid(element: win.element, frame: frame)
+            recordPlacement(of: win.element, frame: frame, in: area)
+            updateCacheFromGrid()
             Task { @MainActor in
-                await WindowAnimator.animate([WindowAnimator.Move(window: win, target: frame)], clampTo: area)
+                await WindowAnimator.animate([WindowAnimator.Move(window: win, target: frame, clamp: area)])
                 status = .applied(movedWindows: 1)
             }
         }
+    }
+
+    /// Fold a manual placement into `DimensionMemory` — sizes *and* the horizontal position, so
+    /// "this app lives on the right" becomes a durable habit that future layouts honor.
+    private func recordPlacement(of element: AXUIElement, frame: CGRect, in area: CGRect?) {
+        guard let area, area.width > 0, area.height > 0 else { return }
+        let app = AXWindow(element).pid.flatMap { NSRunningApplication(processIdentifier: $0) }
+        let catId = categoryStore.categoryId(bundleId: app?.bundleIdentifier, appName: app?.localizedName ?? "")
+        dimensionMemory.record(
+            bundleId: app?.bundleIdentifier,
+            categoryId: catId,
+            widthFraction: Double(frame.width / area.width),
+            heightFraction: Double(frame.height / area.height),
+            xFraction: Double((frame.midX - area.minX) / area.width)
+        )
+    }
+
+    private func recordGridPlacement(of tile: GridTile) {
+        let area = DisplayProvider.display(containing: tile.target)?.visibleFrame
+        recordPlacement(of: tile.handle.element, frame: tile.target, in: area)
+    }
+
+    /// Push the current grid back into the layout cache entry for this window set, so a manual
+    /// correction (swap, snap, resize) refines what "the layout" means for these windows.
+    private func updateCacheFromGrid() {
+        guard settings.reuseLayouts, let signature = lastSignature, !grid.isEmpty else { return }
+        layoutCache.updateIfPresent(signature: signature, entries: grid.map {
+            CachedLayout.Entry(appKey: LayoutCache.appKey(bundleId: $0.bundleId, appName: $0.appName), frame: $0.target)
+        })
     }
 
     /// A sensible destination for the window bumped out of a slot by an untiled drop: kept no larger
@@ -333,7 +537,7 @@ public final class TilingEngine: ObservableObject {
         let neighbors = grid.enumerated().filter { $0.offset != resizedIndex }.map { $0.element }
         applyAndSuppress { applier.applyGrid(neighbors) }
 
-        // Learn the new proportions relative to the display's usable area.
+        // Learn the new proportions (and position) relative to the display's usable area.
         if let display = DisplayProvider.display(containing: newFrame) {
             let vf = display.visibleFrame
             let resized = grid[resizedIndex]
@@ -341,9 +545,11 @@ public final class TilingEngine: ObservableObject {
                 bundleId: resized.bundleId,
                 categoryId: resized.categoryId,
                 widthFraction: Double(newFrame.width / vf.width),
-                heightFraction: Double(newFrame.height / vf.height)
+                heightFraction: Double(newFrame.height / vf.height),
+                xFraction: Double((newFrame.midX - vf.minX) / vf.width)
             )
         }
+        updateCacheFromGrid()   // a manual resize refines the cached layout for this window set
         status = .applied(movedWindows: neighbors.count)
     }
 
@@ -368,12 +574,12 @@ public final class TilingEngine: ObservableObject {
         let tiles = store.resolveTiles(for: layout, windows: windows)
         let plan = LayoutPlan(displaySignature: layout.displaySignature, tiles: tiles)
         let gridTilesForPlan = gridTiles(from: plan, windows: windows)
+        captureUndo(handles: gridTilesForPlan.map(\.handle))
         grid = gridTilesForPlan
         suppressGeometry(for: WindowAnimator.duration)
         Task { @MainActor in
             await WindowAnimator.animate(
-                gridTilesForPlan.map { WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target) },
-                clampTo: nil
+                gridTilesForPlan.map { WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target) }
             )
             status = .applied(movedWindows: tiles.count)
         }

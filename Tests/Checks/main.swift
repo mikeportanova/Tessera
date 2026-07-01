@@ -460,6 +460,100 @@ do {
     check(abs(ModelPricing.cost(oneM, model: "claude-opus-4-8") - 30) < 0.001, "clearing overrides restores default")
 }
 
+// MARK: - Layout cache
+
+do {
+    // Signature is order-independent but count- and display-sensitive.
+    let a = LayoutCache.signature(appKeys: ["com.a", "com.b"], displaySignatures: ["d1"])
+    let b = LayoutCache.signature(appKeys: ["com.b", "com.a"], displaySignatures: ["d1"])
+    check(a == b, "cache signature ignores window order")
+    let c = LayoutCache.signature(appKeys: ["com.a", "com.b", "com.b"], displaySignatures: ["d1"])
+    check(a != c, "a second window of an app changes the signature")
+    let d = LayoutCache.signature(appKeys: ["com.a", "com.b"], displaySignatures: ["d2"])
+    check(a != d, "a different display arrangement changes the signature")
+}
+
+do {
+    // Resolve must consume every entry AND every window; a drifted set returns nil.
+    let w1 = makeWindow("browser"), w2 = makeWindow("chat")
+    let cached = CachedLayout(entries: [
+        CachedLayout.Entry(appKey: "browser", frame: CGRect(x: 0, y: 0, width: 800, height: 600)),
+        CachedLayout.Entry(appKey: "chat", frame: CGRect(x: 810, y: 0, width: 400, height: 600)),
+    ], savedAt: Date())
+    let resolved = LayoutCache.resolve(cached, windows: [w2, w1])   // order shouldn't matter
+    check(resolved != nil && resolved!.count == 2, "cached layout resolves to all windows")
+    if let r = resolved {
+        let browserFrame = r.first { $0.window.id == w1.id }!.frame
+        check(abs(browserFrame.width - 800) < 0.5, "resolved frame goes to the matching app")
+    }
+    check(LayoutCache.resolve(cached, windows: [w1]) == nil, "missing window → no cache hit (replan)")
+    check(LayoutCache.resolve(cached, windows: [w1, w2, makeWindow("editor")]) == nil,
+          "extra window → no cache hit (replan)")
+}
+
+// MARK: - Update checker version compare
+
+do {
+    check(UpdateChecker.isVersion("0.2.0", newerThan: "0.1.9"), "0.2.0 > 0.1.9")
+    check(UpdateChecker.isVersion("0.1.10", newerThan: "0.1.9"), "0.1.10 > 0.1.9 (numeric, not lexical)")
+    check(!UpdateChecker.isVersion("0.1.9", newerThan: "0.1.9"), "equal versions are not newer")
+    check(UpdateChecker.isVersion("v1.0", newerThan: "0.9.9"), "leading v is stripped")
+    check(!UpdateChecker.isVersion("0.1", newerThan: "0.1.0"), "0.1 == 0.1.0")
+}
+
+// MARK: - Quick snap geometry
+
+do {
+    let area = CGRect(x: 0, y: 25, width: 2000, height: 1000)
+    let left = Snap.half(left: true, of: area, gap: 10)
+    let right = Snap.half(left: false, of: area, gap: 10)
+    check(abs(left.width - 985) < 0.5 && abs(right.width - 985) < 0.5, "halves split the area minus three gaps")
+    check(abs(left.minX - 10) < 0.5, "left half starts one gap in")
+    check(abs(right.maxX - 1990) < 0.5, "right half ends one gap short of the edge")
+    check(abs(left.maxX + 10 - right.minX) < 0.5, "exactly one gap between the halves")
+    let maxed = Snap.maximized(of: area, gap: 10)
+    check(abs(maxed.width - 1980) < 0.5 && abs(maxed.minY - 35) < 0.5, "maximize insets by the gap")
+}
+
+// MARK: - Per-app rules + intents in the offline tiler
+
+do {
+    // A pinned-right chat app must end up in the rightmost column even though the tiler would
+    // otherwise order it by width preference.
+    let browser = makeWindow("browser")
+    var chat = makeWindow("chat")
+    chat = ManagedWindow(id: chat.id, pid: 1, appName: "chat", bundleId: "com.test.chat", title: "",
+                         categoryId: "chat", frame: chat.frame, isMinimized: false, axHandle: chat.axHandle)
+    let rules = AppRules(byBundleId: ["com.test.chat": .pinRight])
+    let plan = FallbackTiler.plan(display: display, windows: [chat, browser], gap: 8, catalog: cat, rules: rules)
+    let chatTile = plan.tiles.first { $0.windowId == chat.id }!
+    let browserTile = plan.tiles.first { $0.windowId == browser.id }!
+    check(chatTile.frame.minX > browserTile.frame.minX, "pinRight app lands right of the others")
+}
+
+do {
+    // Under the coding intent, an editor outranks newer chat/music windows for the primary tiles.
+    check(LayoutIntent.coding.priority(categoryId: "editor") < LayoutIntent.coding.priority(categoryId: "chat"),
+          "coding intent ranks editor above chat")
+    check(LayoutIntent.communication.priority(categoryId: "chat") < LayoutIntent.communication.priority(categoryId: "terminal"),
+          "communication intent ranks chat above terminal")
+    check(LayoutIntent.automatic.priority(categoryId: "chat") == LayoutIntent.automatic.priority(categoryId: "editor"),
+          "automatic intent is pure recency (no category ranking)")
+}
+
+// MARK: - Learned position (side preference)
+
+do {
+    let leftish = LearnedDims(widthFraction: 0.3, heightFraction: 0.8, xFraction: 0.2, samples: 5)
+    check(leftish.sidePreference == "left", "x≈0.2 reads as a left-side habit")
+    let rightish = LearnedDims(widthFraction: 0.3, heightFraction: 0.8, xFraction: 0.8, samples: 5)
+    check(rightish.sidePreference == "right", "x≈0.8 reads as a right-side habit")
+    let centered = LearnedDims(widthFraction: 0.3, heightFraction: 0.8, xFraction: 0.5, samples: 5)
+    check(centered.sidePreference == nil, "centered x has no side preference")
+    let unseen = LearnedDims(widthFraction: 0.3, heightFraction: 0.8, xFraction: 0.9, samples: 1)
+    check(unseen.sidePreference == nil, "one sample isn't a habit yet")
+}
+
 // MARK: - Report
 
 print("Tessera checks: \(passed) passed, \(failures) failed")

@@ -10,6 +10,7 @@ struct MenuContentView: View {
     @EnvironmentObject private var permissions: PermissionsManager
     @EnvironmentObject private var engine: TilingEngine
     @EnvironmentObject private var rateLimiter: RateLimiter
+    @EnvironmentObject private var updateChecker: UpdateChecker
 
     @Environment(\.openSettings) private var openSettings
 
@@ -136,17 +137,31 @@ struct MenuContentView: View {
     // MARK: - Primary action
 
     private var tileButton: some View {
-        Button {
-            model.tileNow()
-        } label: {
-            Label(settings.offlineMode ? "Tile Now (offline)" : "Tile Now",
-                  systemImage: settings.offlineMode ? "square.grid.2x2" : "wand.and.stars")
-                .font(.body.weight(.medium))
-                .frame(maxWidth: .infinity)
+        HStack(spacing: 8) {
+            Button {
+                model.tileNow()
+            } label: {
+                Label(settings.offlineMode ? "Tile Now (offline)" : "Tile Now",
+                      systemImage: settings.offlineMode ? "square.grid.2x2" : "wand.and.stars")
+                    .font(.body.weight(.medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .controlSize(.large)
+            .prominentGlassButton()
+            .disabled(!permissions.accessibilityTrusted || engine.status == .planning)
+
+            if engine.canUndo {
+                Button {
+                    model.undoLastLayout()
+                } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                        .font(.body.weight(.medium))
+                }
+                .controlSize(.large)
+                .glassButton()
+                .help("Undo the last layout (⌃⌥⌘Z)")
+            }
         }
-        .controlSize(.large)
-        .prominentGlassButton()
-        .disabled(!permissions.accessibilityTrusted || engine.status == .planning)
     }
 
     // MARK: - Arrange section
@@ -154,6 +169,16 @@ struct MenuContentView: View {
     private var arrangeSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             SectionHeader(title: "Arranging", symbol: "slider.horizontal.3")
+
+            Picker(selection: $settings.intent) {
+                ForEach(LayoutIntent.allCases, id: \.self) { intent in
+                    Label(intent.displayName, systemImage: intent.symbolName).tag(intent)
+                }
+            } label: {
+                Label("Focus", systemImage: "scope")
+            }
+            .pickerStyle(.menu)
+            .help("Tell the layout engine what you're doing — coding keeps the editor big, communication puts chat front and center.")
 
             Toggle(isOn: $settings.autoArrange) {
                 Label("Auto-tile when windows open", systemImage: "sparkles")
@@ -269,7 +294,20 @@ struct MenuContentView: View {
 
     // MARK: - Footer
 
+    @ViewBuilder
     private var footer: some View {
+        if let version = updateChecker.availableVersion, let url = updateChecker.releaseURL {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down.circle.fill").foregroundStyle(.tint)
+                Text("Tessera \(version) is available")
+                Spacer()
+                Link("Get it", destination: url).font(.callout.weight(.medium))
+            }
+            .font(.callout)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.tint.opacity(0.12)))
+        }
         HStack {
             Button { openSettings() } label: {
                 Label("Preferences", systemImage: "gearshape")

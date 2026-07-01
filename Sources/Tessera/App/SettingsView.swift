@@ -7,6 +7,8 @@ struct PreferencesView: View {
         TabView {
             GeneralPrefs()
                 .tabItem { Label("General", systemImage: "gearshape") }
+            AppsPrefs()
+                .tabItem { Label("Apps", systemImage: "app.badge.checkmark") }
             UsagePrefs()
                 .tabItem { Label("Usage", systemImage: "chart.bar") }
             CategoriesPrefs()
@@ -19,8 +21,10 @@ struct PreferencesView: View {
 // MARK: - General
 
 private struct GeneralPrefs: View {
+    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var dimensionMemory: DimensionMemory
+    @EnvironmentObject private var updateChecker: UpdateChecker
 
     @State private var apiKeyField: String = ""
     @State private var savedConfirmation = false
@@ -51,11 +55,22 @@ private struct GeneralPrefs: View {
                 .disabled(!settings.hasAPIKey)
             }
 
-            Section("Global shortcut") {
+            Section("Shortcuts") {
                 Picker("Tile now", selection: $settings.tileShortcut) {
                     ForEach(TileShortcut.allCases, id: \.self) { Text($0.displayName).tag($0) }
                 }
-                Text("Press this anywhere to re-tile — handy when auto-arrange is off.")
+                Toggle("Quick-snap keys for the focused window", isOn: $settings.quickSnapShortcuts)
+                Text("⌃⌥← left half · ⌃⌥→ right half · ⌃⌥↩ maximize. Undo the last layout anytime with ⌃⌥⌘Z.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Behavior") {
+                Toggle("Launch at login", isOn: $model.launchAtLogin)
+                Toggle("Reuse recent AI layouts", isOn: $settings.reuseLayouts)
+                Text("Re-tiling the same windows re-applies the last AI layout instantly — no tokens, no wait. Your manual tweaks refine it.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Preview before applying", isOn: $settings.previewBeforeApply)
+                Text("Shows the proposed layout as ghost outlines — ⏎ applies, ⎋ cancels.")
                     .font(.caption).foregroundStyle(.secondary)
             }
 
@@ -74,8 +89,78 @@ private struct GeneralPrefs: View {
                     Button("Forget all", role: .destructive) { dimensionMemory.reset() }
                         .disabled(dimensionMemory.sampleCount == 0)
                 }
-                Text("Tessera remembers how you size each app and feeds it back into future layouts.")
+                Text("Tessera remembers how you size and position each app and feeds it back into future layouts.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Updates") {
+                HStack {
+                    Text("Version \(UpdateChecker.currentVersion)")
+                    Spacer()
+                    if updateChecker.isChecking {
+                        ProgressView().controlSize(.small)
+                    } else if let v = updateChecker.availableVersion, let url = updateChecker.releaseURL {
+                        Link("Get \(v)", destination: url)
+                    } else {
+                        Button("Check for Updates") { Task { await updateChecker.checkNow() } }
+                    }
+                }
+                if let last = updateChecker.lastChecked, updateChecker.availableVersion == nil {
+                    Text("Up to date · last checked \(last.formatted(.relative(presentation: .named)))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+// MARK: - Apps (per-app rules)
+
+private struct AppsPrefs: View {
+    @EnvironmentObject private var rules: AppRulesStore
+
+    /// Currently-running regular apps plus any apps with an existing rule (even if not running).
+    private var apps: [(bundleId: String, name: String, icon: NSImage?)] {
+        var seen: [String: (name: String, icon: NSImage?)] = [:]
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard let id = app.bundleIdentifier, id != "com.fileread.Tessera" else { continue }
+            seen[id] = (app.localizedName ?? id, app.icon)
+        }
+        for id in rules.byBundleId.keys where seen[id] == nil {
+            seen[id] = (id.components(separatedBy: ".").last ?? id, nil)
+        }
+        return seen.map { (bundleId: $0.key, name: $0.value.name, icon: $0.value.icon) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    var body: some View {
+        Form {
+            Section {
+                Text("Set how each app participates in tiling. Float keeps an app out of every layout; pins force it to a side.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Running apps") {
+                ForEach(apps, id: \.bundleId) { app in
+                    HStack(spacing: 10) {
+                        if let icon = app.icon {
+                            Image(nsImage: icon).resizable().frame(width: 22, height: 22)
+                        } else {
+                            Image(systemName: "app.dashed").frame(width: 22, height: 22)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(app.name).lineLimit(1)
+                        Spacer()
+                        Picker("", selection: Binding(
+                            get: { rules.rule(for: app.bundleId) },
+                            set: { rules.set($0, for: app.bundleId) }
+                        )) {
+                            ForEach(AppRule.allCases, id: \.self) { Text($0.displayName).tag($0) }
+                        }
+                        .labelsHidden()
+                        .frame(width: 170)
+                    }
+                }
             }
         }
         .formStyle(.grouped)

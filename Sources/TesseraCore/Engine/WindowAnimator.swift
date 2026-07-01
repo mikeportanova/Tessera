@@ -20,9 +20,13 @@ public enum WindowAnimator {
     public struct Move {
         public let window: AXWindow
         public let target: CGRect
-        public init(window: AXWindow, target: CGRect) {
+        /// Work area to keep the window inside after final placement (per-move, since a single
+        /// animation pass can span displays). Nil skips the on-screen correction.
+        public let clamp: CGRect?
+        public init(window: AXWindow, target: CGRect, clamp: CGRect? = nil) {
             self.window = window
             self.target = target
+            self.clamp = clamp
         }
     }
 
@@ -36,15 +40,15 @@ public enum WindowAnimator {
     /// so a step-indexed loop stretches the slide and wobbles its velocity — a slow frame should skip
     /// ahead, keeping the eased motion even and the total duration honest. Windows already at their
     /// target are left out of the interpolation entirely (no AX churn for windows that aren't moving).
-    public static func animate(_ moves: [Move], clampTo area: CGRect?) async {
-        let items = moves.compactMap { m -> (AXWindow, CGRect, CGRect)? in
+    public static func animate(_ moves: [Move]) async {
+        let items = moves.compactMap { m -> (move: Move, start: CGRect)? in
             guard let start = m.window.frame else { return nil }
-            return (m.window, start, m.target)
+            return (m, start)
         }
         guard !items.isEmpty else { return }
 
         // Only windows that actually have somewhere to go participate in the slide.
-        let moving = items.filter { !approxSameFrame($0.1, $0.2) }
+        let moving = items.filter { !approxSameFrame($0.start, $0.move.target) }
 
         if !reduceMotion && !moving.isEmpty {
             let frameNanos: UInt64 = 16_666_667   // ~60fps
@@ -53,18 +57,19 @@ public enum WindowAnimator {
                 let raw = min(1.0, Date().timeIntervalSince(startTime) / duration)
                 if raw >= 1.0 { break }            // t = 1 is the exact final placement below
                 let t = smootherStep(raw)
-                for (win, start, target) in moving {
-                    win.setSize(lerpSize(start.size, target.size, t))
-                    win.setPosition(lerpPoint(start.origin, target.origin, t))
+                for item in moving {
+                    item.move.window.setSize(lerpSize(item.start.size, item.move.target.size, t))
+                    item.move.window.setPosition(lerpPoint(item.start.origin, item.move.target.origin, t))
                 }
                 try? await Task.sleep(nanoseconds: frameNanos)
             }
         }
 
-        // Final exact placement (and on-screen correction) regardless of reduce-motion.
-        for (win, _, target) in items {
-            _ = win.setFrame(target)
-            if let area, let actual = win.frame,
+        // Final exact placement (and per-move on-screen correction) regardless of reduce-motion.
+        for item in items {
+            let win = item.move.window
+            _ = win.setFrame(item.move.target)
+            if let area = item.move.clamp, let actual = win.frame,
                let fixed = WindowApplier.onScreenOrigin(for: actual, in: area), fixed != actual.origin {
                 win.setPosition(fixed)
             }

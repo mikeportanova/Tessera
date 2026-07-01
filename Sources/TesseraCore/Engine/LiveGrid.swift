@@ -244,6 +244,18 @@ public enum Snap {
         return !isShort || isReasonablyShaped(rect)
     }
 
+    /// Frame for the left or right half of a work area, honoring the gap (Magnet-style quick snap).
+    public static func half(left: Bool, of area: CGRect, gap: CGFloat) -> CGRect {
+        let w = (area.width - 3 * gap) / 2
+        let x = left ? area.minX + gap : area.minX + 2 * gap + w
+        return CGRect(x: x, y: area.minY + gap, width: w, height: area.height - 2 * gap)
+    }
+
+    /// Frame filling the work area, honoring the gap (Magnet-style maximize; not macOS full screen).
+    public static func maximized(of area: CGRect, gap: CGFloat) -> CGRect {
+        area.insetBy(dx: gap, dy: gap)
+    }
+
     /// Cap a proposed snap rect's width to at most `maxFraction` of the display, unless it's a genuine
     /// full-screen suggestion (full width *and* full height). A rect that spans the whole width but
     /// only part of the height looks absurd on a wide display, so we trim it to the half the cursor is

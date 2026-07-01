@@ -26,6 +26,9 @@ public final class AutoArrangeCoordinator {
 
     public func start() {
         observerManager.onWindowsChanged = { [weak self] in
+            // Always maintain the grid — prune dead entries and invalidate the previous window-set
+            // cache key — even when auto-arrange is off.
+            self?.engine.windowSetChanged()
             self?.scheduleRetile()
         }
         observerManager.onWindowGeometryChanged = { [weak self] in
@@ -48,8 +51,9 @@ public final class AutoArrangeCoordinator {
             guard let self else { return }
             try? await Task.sleep(for: self.retileDebounce)
             guard !Task.isCancelled, self.settings.autoArrange else { return }
-            // Auto re-tiles use the free, fast offline tiler — never the LLM.
-            await self.engine.retile(useAI: false)
+            // Auto re-tiles use the free, fast offline tiler — never the LLM — and never interrupt
+            // with a preview prompt the user didn't ask for.
+            await self.engine.retile(useAI: false, interactive: false)
         }
     }
 

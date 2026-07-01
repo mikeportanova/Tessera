@@ -7,20 +7,35 @@ import CoreGraphics
 public struct LearnedDims: Codable, Sendable {
     public var widthFraction: Double
     public var heightFraction: Double
+    /// Learned horizontal *position*: the window center's x as a fraction of usable width (0 = far
+    /// left, 1 = far right). Recorded when the user swaps, snaps, or resizes — so "terminal goes on
+    /// the right" sticks. Optional so files saved before this field existed still decode.
+    public var xFraction: Double?
     public var samples: Int
 
-    public init(widthFraction: Double, heightFraction: Double, samples: Int) {
+    public init(widthFraction: Double, heightFraction: Double, xFraction: Double? = nil, samples: Int) {
         self.widthFraction = widthFraction
         self.heightFraction = heightFraction
+        self.xFraction = xFraction
         self.samples = samples
     }
 
     /// Fold a new observation into the running average (cap the weight so old habits keep adapting).
-    func adding(width: Double, height: Double) -> LearnedDims {
+    func adding(width: Double, height: Double, x: Double?) -> LearnedDims {
         let n = min(samples, 20)
         let w = (widthFraction * Double(n) + width) / Double(n + 1)
         let h = (heightFraction * Double(n) + height) / Double(n + 1)
-        return LearnedDims(widthFraction: w, heightFraction: h, samples: samples + 1)
+        var newX = xFraction
+        if let x { newX = ((xFraction ?? x) * Double(n) + x) / Double(n + 1) }
+        return LearnedDims(widthFraction: w, heightFraction: h, xFraction: newX, samples: samples + 1)
+    }
+
+    /// A coarse side preference derived from the learned position, or nil when it's central/unknown.
+    public var sidePreference: String? {
+        guard let x = xFraction, samples >= 2 else { return nil }
+        if x < 0.35 { return "left" }
+        if x > 0.65 { return "right" }
+        return nil
     }
 }
 
@@ -71,18 +86,20 @@ public final class DimensionMemory: ObservableObject {
         load()
     }
 
-    /// Record an observed sizing for an app. `widthFraction`/`heightFraction` are relative to the
-    /// usable area (0...1). Updates both the per-app and per-category running averages.
-    public func record(bundleId: String?, categoryId: String, widthFraction: Double, heightFraction: Double) {
+    /// Record an observed sizing (and optionally horizontal position) for an app.
+    /// `widthFraction`/`heightFraction`/`xFraction` are relative to the usable area (0...1).
+    /// Updates both the per-app and per-category running averages.
+    public func record(bundleId: String?, categoryId: String, widthFraction: Double, heightFraction: Double, xFraction: Double? = nil) {
         let w = widthFraction.clamped(to: 0.05...1.0)
         let h = heightFraction.clamped(to: 0.05...1.0)
+        let x = xFraction.map { $0.clamped(to: 0.0...1.0) }
 
         if let bundleId {
             store.byBundle[bundleId] = (store.byBundle[bundleId] ?? LearnedDims(widthFraction: w, heightFraction: h, samples: 0))
-                .adding(width: w, height: h)
+                .adding(width: w, height: h, x: x)
         }
         store.byCategory[categoryId] = (store.byCategory[categoryId] ?? LearnedDims(widthFraction: w, heightFraction: h, samples: 0))
-            .adding(width: w, height: h)
+            .adding(width: w, height: h, x: x)
 
         sampleCount = store.byBundle.values.reduce(0) { $0 + $1.samples }
         scheduleSave()   // a resize-drag records repeatedly — coalesce the writes

@@ -19,7 +19,9 @@ public enum FallbackTiler {
         windows: [ManagedWindow],
         gap: Double,
         catalog: CategoryCatalog,
-        learned: LearnedDimensions = .empty
+        learned: LearnedDimensions = .empty,
+        intent: LayoutIntent = .automatic,
+        rules: AppRules = .empty
     ) -> LayoutPlan {
         let area = display.visibleFrame
         let g = CGFloat(gap)
@@ -32,11 +34,17 @@ public enum FallbackTiler {
         let maxRows = Swift.max(1, Int((area.height + g) / (comfortableCell.height + g)))
         let capacity = maxCols * maxRows
 
-        // `windows` is recency order (front-most first): the most-recent get proper tiles.
-        let primary = Array(windows.prefix(min(windows.count, capacity)))
-        let overflow = Array(windows.dropFirst(primary.count))
+        // `windows` arrive in recency order (front-most first). Under an intent, category priority
+        // outranks recency, so e.g. "coding" keeps the editor in a proper tile even if chat is newer;
+        // recency still breaks ties within a priority band.
+        let ranked = windows.enumerated()
+            .sorted { (intent.priority(categoryId: $0.element.categoryId), $0.offset)
+                    < (intent.priority(categoryId: $1.element.categoryId), $1.offset) }
+            .map(\.element)
+        let primary = Array(ranked.prefix(min(ranked.count, capacity)))
+        let overflow = Array(ranked.dropFirst(primary.count))
 
-        var tiles = gridTiles(area: area, windows: primary, g: g, catalog: catalog, learned: learned)
+        var tiles = gridTiles(area: area, windows: primary, g: g, catalog: catalog, learned: learned, rules: rules)
         tiles.append(contentsOf: cascadeTiles(area: area, windows: overflow, g: g))
         return LayoutPlan(displaySignature: display.signature, tiles: tiles)
     }
@@ -44,13 +52,30 @@ public enum FallbackTiler {
     /// Lay windows out in a min-aware grid filling `area`, anchored top-left.
     private static func gridTiles(
         area: CGRect, windows: [ManagedWindow], g: CGFloat,
-        catalog: CategoryCatalog, learned: LearnedDimensions
+        catalog: CategoryCatalog, learned: LearnedDimensions, rules: AppRules = .empty
     ) -> [Tile] {
         guard !windows.isEmpty else { return [] }
 
-        // Within the primary set, order widest-preference first for a stable left-to-right layout.
+        // Left-to-right ordering: hard pins first/last, then the user's learned side habit, then
+        // widest-preference first for a stable layout. Columns are filled in this order, so a
+        // pinned-left app lands in the leftmost column and a learned "right" habit drifts rightward.
         func prior(_ w: ManagedWindow) -> Double { catalog.widthPrior(id: w.categoryId, bundleId: w.bundleId, learned: learned) }
-        let ordered = windows.sorted { prior($0) > prior($1) }
+        func pinRank(_ w: ManagedWindow) -> Int {
+            switch rules.rule(for: w.bundleId) {
+            case .pinLeft: return 0
+            case .pinRight: return 2
+            default: return 1
+            }
+        }
+        func xKey(_ w: ManagedWindow) -> Double {
+            learned.dims(bundleId: w.bundleId, categoryId: w.categoryId)?.xFraction ?? 0.5
+        }
+        let ordered = windows.enumerated()
+            .sorted { a, b in
+                (pinRank(a.element), xKey(a.element), -prior(a.element), a.offset)
+              < (pinRank(b.element), xKey(b.element), -prior(b.element), b.offset)
+            }
+            .map(\.element)
 
         func group(into cols: Int) -> [[ManagedWindow]] {
             let rpc = Int(ceil(Double(ordered.count) / Double(cols)))

@@ -16,17 +16,21 @@ struct TesseraApp: App {
                 .environmentObject(delegate.model.permissions)
                 .environmentObject(delegate.model.engine)
                 .environmentObject(delegate.model.rateLimiter)
+                .environmentObject(delegate.model.updateChecker)
         }
         .menuBarExtraStyle(.window)
 
         // Standard Preferences window (⌘, / "Preferences…"), where any user enters their own key.
         Settings {
             PreferencesView()
+                .environmentObject(delegate.model)
                 .environmentObject(delegate.model.settings)
                 .environmentObject(delegate.model.dimensionMemory)
                 .environmentObject(delegate.model.categoryStore)
                 .environmentObject(delegate.model.usageTracker)
                 .environmentObject(delegate.model.pricingStore)
+                .environmentObject(delegate.model.appRules)
+                .environmentObject(delegate.model.updateChecker)
         }
     }
 }
