@@ -97,18 +97,41 @@ private struct GeneralPrefs: View {
                 HStack {
                     Text("Version \(UpdateChecker.currentVersion)")
                     Spacer()
-                    if updateChecker.isChecking {
-                        ProgressView().controlSize(.small)
-                    } else if let v = updateChecker.availableVersion, let url = updateChecker.releaseURL {
-                        Link("Get \(v)", destination: url)
-                    } else {
-                        Button("Check for Updates") { Task { await updateChecker.checkNow() } }
+                    switch updateChecker.phase {
+                    case .downloading, .installing, .relaunching:
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text(updateChecker.phase == .downloading ? "Downloading…" :
+                                 updateChecker.phase == .installing ? "Installing…" : "Relaunching…")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    default:
+                        if updateChecker.isChecking {
+                            ProgressView().controlSize(.small)
+                        } else if let v = updateChecker.availableVersion {
+                            if updateChecker.dmgURL != nil {
+                                Button("Update to \(v)") { Task { await updateChecker.updateNow() } }
+                            } else if let url = updateChecker.releaseURL {
+                                Link("Get \(v)", destination: url)
+                            }
+                        } else {
+                            Button("Check for Updates") { Task { await updateChecker.checkNow() } }
+                        }
+                    }
+                }
+                if case let .failed(message) = updateChecker.phase {
+                    Text(message).font(.caption).foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let url = updateChecker.releaseURL {
+                        Link("Download from the release page instead", destination: url).font(.caption)
                     }
                 }
                 if let last = updateChecker.lastChecked, updateChecker.availableVersion == nil {
                     Text("Up to date · last checked \(last.formatted(.relative(presentation: .named)))")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Text("Updates install in place and relaunch automatically — settings and permissions are kept.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

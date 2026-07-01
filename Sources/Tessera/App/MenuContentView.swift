@@ -296,12 +296,37 @@ struct MenuContentView: View {
 
     @ViewBuilder
     private var footer: some View {
-        if let version = updateChecker.availableVersion, let url = updateChecker.releaseURL {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down.circle.fill").foregroundStyle(.tint)
-                Text("Tessera \(version) is available")
-                Spacer()
-                Link("Get it", destination: url).font(.callout.weight(.medium))
+        if let version = updateChecker.availableVersion {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.circle.fill").foregroundStyle(.tint)
+                    Text("Tessera \(version) is available")
+                    Spacer()
+                    switch updateChecker.phase {
+                    case .downloading, .installing, .relaunching:
+                        HStack(spacing: 5) {
+                            ProgressView().controlSize(.small)
+                            Text(updatePhaseLabel).foregroundStyle(.secondary)
+                        }
+                    default:
+                        if updateChecker.dmgURL != nil {
+                            Button("Update Now") { Task { await updateChecker.updateNow() } }
+                                .font(.callout.weight(.medium))
+                                .buttonStyle(.borderless)
+                        } else if let url = updateChecker.releaseURL {
+                            Link("Get it", destination: url).font(.callout.weight(.medium))
+                        }
+                    }
+                }
+                if case let .failed(message) = updateChecker.phase {
+                    HStack(spacing: 6) {
+                        Text(message).foregroundStyle(.secondary).font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let url = updateChecker.releaseURL {
+                            Link("Open release page", destination: url).font(.caption.weight(.medium))
+                        }
+                    }
+                }
             }
             .font(.callout)
             .padding(.horizontal, 10)
@@ -324,5 +349,14 @@ struct MenuContentView: View {
             .keyboardShortcut("q")
         }
         .font(.callout)
+    }
+
+    private var updatePhaseLabel: String {
+        switch updateChecker.phase {
+        case .downloading:  return "Downloading…"
+        case .installing:   return "Installing…"
+        case .relaunching:  return "Relaunching…"
+        default:            return ""
+        }
     }
 }
