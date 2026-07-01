@@ -33,6 +33,13 @@ public struct AXWindow: @unchecked Sendable {
         return AXUIElementGetPid(element, &p) == .success ? p : nil
     }
 
+    /// Whether the underlying element is still a live, readable window. A window whose app has closed
+    /// it returns an error for any attribute read — use this to prune stale grid entries.
+    public var isAlive: Bool {
+        var ref: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &ref) == .success
+    }
+
     // MARK: - Reads
 
     public var title: String {

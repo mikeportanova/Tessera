@@ -221,4 +221,37 @@ public enum Snap {
         }
         return r
     }
+
+    /// A snap zone wider than this ratio (width ÷ height) is an absurd short-and-wide sliver, so we
+    /// don't propose it. Tall-and-narrow is intentionally left alone — thin columns (chat, terminals)
+    /// are legitimate window shapes.
+    public static let maxWidthToHeightRatio: CGFloat = 3.0
+
+    /// Whether a proposed snap rect has a sensible width-to-height ratio (not a super-wide sliver).
+    public static func isReasonablyShaped(_ rect: CGRect) -> Bool {
+        rect.height > 0 && rect.width / rect.height <= maxWidthToHeightRatio
+    }
+
+    /// Whether a snap zone is worth proposing within `area`. A *short* and super-wide sliver is not —
+    /// but a full-height wide zone (e.g. maximizing on a genuine ultrawide display) always is, so the
+    /// aspect guard only applies to zones that are also short (well under the display's height).
+    public static func isProposable(_ rect: CGRect, in area: CGRect) -> Bool {
+        let isShort = rect.height < area.height * 0.6
+        return !isShort || isReasonablyShaped(rect)
+    }
+
+    /// Cap a proposed snap rect's width to at most `maxFraction` of the display, unless it's a genuine
+    /// full-screen suggestion (full width *and* full height). A rect that spans the whole width but
+    /// only part of the height looks absurd on a wide display, so we trim it to the half the cursor is
+    /// in. Height is never capped — a full-height column is a perfectly good tile.
+    public static func capWidth(_ rect: CGRect, in area: CGRect, toward cursor: CGPoint, maxFraction: CGFloat = 0.5) -> CGRect {
+        let fullWidth = rect.width >= area.width - 1
+        let fullHeight = rect.height >= area.height - 1
+        if fullWidth && fullHeight { return rect }          // real full-screen → leave it
+        let cap = area.width * maxFraction
+        guard rect.width > cap + 1 else { return rect }
+        // Keep the capped rect on the side of its midline the cursor sits on.
+        let minX = cursor.x <= rect.midX ? rect.minX : rect.maxX - cap
+        return CGRect(x: minX, y: rect.minY, width: cap, height: rect.height)
+    }
 }

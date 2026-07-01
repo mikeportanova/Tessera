@@ -15,10 +15,16 @@ public final class DragInteractionManager {
 
     private var monitors: [Any] = []
     private var downLocation: CGPoint?     // AppKit (bottom-left) global coords
+    /// Window under the cursor captured at mouse-down (before the OS drag moves it), with its frame.
+    private var pendingGrab: (window: AXWindow, frame: CGRect)?
     private var dragging = false
+    /// Set when the user presses Escape mid-drag: the snap is abandoned and the release applies nothing.
+    private var cancelled = false
 
     /// Minimum cursor travel (points) before a press counts as a drag.
     private let dragThreshold: CGFloat = 8
+    /// Escape.
+    private let escapeKeyCode: UInt16 = 53
 
     public init(engine: TilingEngine, settings: AppSettings) {
         self.engine = engine
@@ -35,7 +41,10 @@ public final class DragInteractionManager {
         let up = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] _ in
             MainActor.assumeIsolated { self?.handleUp() }
         }
-        monitors = [down, drag, up].compactMap { $0 }
+        let key = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            MainActor.assumeIsolated { self?.handleKeyDown(event) }
+        }
+        monitors = [down, drag, up, key].compactMap { $0 }
     }
 
     public func stop() {
@@ -53,22 +62,40 @@ public final class DragInteractionManager {
     private func handleDown() {
         downLocation = NSEvent.mouseLocation
         dragging = false
+        cancelled = false
+        pendingGrab = nil
+        // Capture the window under the cursor NOW, before the OS drag moves it, so the title-bar grab
+        // test is against its original position. Only when snapping is enabled (skips the AX hit-test
+        // cost on every click otherwise).
+        guard settings.snapEnabled else { return }
+        let p = cg(NSEvent.mouseLocation)
+        if let w = AXWindow.window(atCG: p), let f = w.frame {
+            pendingGrab = (w, f)
+        }
     }
 
     private func handleDragged() {
-        guard settings.snapEnabled, let down = downLocation else { return }
+        guard settings.snapEnabled, !cancelled, let down = downLocation else { return }
         let now = NSEvent.mouseLocation
         if !dragging {
             guard abs(now.x - down.x) > dragThreshold || abs(now.y - down.y) > dragThreshold else { return }
             dragging = true
-            engine.dragBegan(atCG: cg(down))
+            guard let grab = pendingGrab else { return }
+            engine.dragBegan(atCG: cg(down), window: grab.window, originalFrame: grab.frame)
         }
         engine.dragMoved(toCG: cg(now))
     }
 
     private func handleUp() {
-        defer { downLocation = nil; dragging = false }
-        guard dragging else { return }
+        defer { downLocation = nil; dragging = false; cancelled = false; pendingGrab = nil }
+        guard dragging, !cancelled else { return }
         engine.dragEnded(atCG: cg(NSEvent.mouseLocation))
+    }
+
+    /// Escape mid-drag abandons the snap: drop the preview and let the release apply nothing.
+    private func handleKeyDown(_ event: NSEvent) {
+        guard dragging, !cancelled, event.keyCode == escapeKeyCode else { return }
+        cancelled = true
+        engine.dragCancelled()
     }
 }

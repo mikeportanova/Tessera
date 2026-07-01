@@ -321,6 +321,40 @@ do {
 }
 
 do {
+    // Width cap on a wide display (5200×2180). A full-width, half-height rect must be trimmed to
+    // half the width, anchored on the cursor's side; a genuine full-screen rect is left alone.
+    let area = CGRect(x: 0, y: 0, width: 5200, height: 2180)
+    let fullWidthHalfHeight = CGRect(x: 0, y: 0, width: 5200, height: 1090)
+    let leftCursor = Snap.capWidth(fullWidthHalfHeight, in: area, toward: CGPoint(x: 300, y: 500))
+    check(abs(leftCursor.width - 2600) < 0.5 && abs(leftCursor.minX - 0) < 0.5, "wide/partial rect capped to left half near a left cursor")
+    let rightCursor = Snap.capWidth(fullWidthHalfHeight, in: area, toward: CGPoint(x: 4800, y: 500))
+    check(abs(rightCursor.width - 2600) < 0.5 && abs(rightCursor.maxX - 5200) < 0.5, "wide/partial rect capped to right half near a right cursor")
+    check(abs(leftCursor.height - 1090) < 0.5, "capping width never touches height")
+
+    let fullScreen = Snap.capWidth(area, in: area, toward: CGPoint(x: 2600, y: 1090))
+    check(fullScreen == area, "genuine full-screen suggestion is left uncapped")
+
+    let column = CGRect(x: 0, y: 0, width: 1600, height: 2180)      // already under half width
+    check(Snap.capWidth(column, in: area, toward: CGPoint(x: 800, y: 1090)) == column, "narrow full-height column is left alone")
+}
+
+do {
+    // Shape guard: reject a short, super-wide sliver; accept normal and tall-narrow shapes.
+    check(!Snap.isReasonablyShaped(CGRect(x: 0, y: 0, width: 2600, height: 400)), "short/super-wide sliver (6.5:1) is rejected")
+    check(Snap.isReasonablyShaped(CGRect(x: 0, y: 0, width: 2600, height: 1000)), "a well-proportioned zone (2.6:1) is accepted")
+    check(Snap.isReasonablyShaped(CGRect(x: 0, y: 0, width: 400, height: 1600)), "a tall narrow column is accepted (tall shapes aren't capped)")
+    check(!Snap.isReasonablyShaped(CGRect(x: 0, y: 0, width: 900, height: 0)), "a zero-height rect is rejected")
+
+    // isProposable adds the "short" qualifier so full-height wide zones (ultrawide maximize) survive.
+    let area = CGRect(x: 0, y: 0, width: 5120, height: 1440)                 // 32:9-ish ultrawide
+    check(Snap.isProposable(area, in: area), "full-height ultrawide zone is proposable despite a >3 ratio")
+    check(!Snap.isProposable(CGRect(x: 0, y: 0, width: 2600, height: 400), in: CGRect(x: 0, y: 0, width: 5200, height: 2180)),
+          "a short, super-wide band is not proposable")
+    check(Snap.isProposable(CGRect(x: 0, y: 0, width: 2600, height: 1040), in: CGRect(x: 0, y: 0, width: 5200, height: 2180)),
+          "a half-height, half-width zone is proposable")
+}
+
+do {
     // Two windows border the open region. A greedy shrink keeps the wider left strip first, then
     // the second window forces it to trim again → 400k. The true maximum is the full-width top
     // strip → 500k. This guards against that regression.

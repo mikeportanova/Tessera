@@ -323,22 +323,32 @@ private struct CategoryDetail: View {
     }
 }
 
-/// A little to-scale diagram showing how big this category's window is relative to a display.
+/// A little to-scale diagram showing how big this category's window is relative to the user's own
+/// display — the board matches the current screen's aspect ratio, and the window rectangles are
+/// scaled against its real point dimensions (the same coordinate space the tiler works in).
 private struct SizePreview: View {
     let profile: CategoryProfile
-    private let refW: CGFloat = 2560
-    private let refH: CGFloat = 1440
+
+    /// The current display's size in points. Falls back to a common 16:9 size if unavailable.
+    private var screen: CGSize {
+        NSScreen.main?.frame.size ?? CGSize(width: 2560, height: 1440)
+    }
 
     var body: some View {
+        let screen = self.screen
         GeometryReader { geo in
-            let scale = geo.size.width / refW
-            let maxW = Swift.min(profile.maxWidth * scale, geo.size.width)
-            let maxH = Swift.min(profile.maxHeight * scale, geo.size.height)
-            let minW = Swift.min(profile.minWidth * scale, maxW)
-            let minH = Swift.min(profile.minHeight * scale, maxH)
+            // Fit a to-scale board with the display's aspect ratio into the available area.
+            let scale = Swift.min(geo.size.width / screen.width, geo.size.height / screen.height)
+            let boardW = screen.width * scale
+            let boardH = screen.height * scale
+            let maxW = Swift.min(profile.maxWidth, screen.width) * scale
+            let maxH = Swift.min(profile.maxHeight, screen.height) * scale
+            let minW = Swift.min(Swift.min(profile.minWidth, screen.width) * scale, maxW)
+            let minH = Swift.min(Swift.min(profile.minHeight, screen.height) * scale, maxH)
 
             ZStack(alignment: .topLeading) {
                 RoundedRectangle(cornerRadius: 4).fill(.quaternary.opacity(0.4))
+                    .frame(width: boardW, height: boardH)
                 RoundedRectangle(cornerRadius: 3).fill(.tint.opacity(0.25))
                     .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(.tint, lineWidth: 1))
                     .frame(width: maxW, height: maxH)
@@ -347,10 +357,11 @@ private struct SizePreview: View {
                     .foregroundStyle(.tint.opacity(0.7))
                     .frame(width: minW, height: minH)
             }
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
         }
         .frame(height: 150)
         .overlay(alignment: .bottomTrailing) {
-            Text("filled = max · dashed = min, on a 2560×1440 display")
+            Text("filled = max · dashed = min, on your \(Int(screen.width))×\(Int(screen.height)) display")
                 .font(.caption2).foregroundStyle(.secondary).padding(4)
         }
     }
