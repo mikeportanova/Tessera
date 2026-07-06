@@ -15,8 +15,11 @@ public final class DragInteractionManager {
 
     private var monitors: [Any] = []
     private var downLocation: CGPoint?     // AppKit (bottom-left) global coords
-    /// Window under the cursor captured at mouse-down (before the OS drag moves it), with its frame.
-    private var pendingGrab: (window: AXWindow, frame: CGRect)?
+    /// Window under the cursor captured at mouse-down (before the OS drag moves it), with its frame
+    /// and a snapshot of every other visible window's bounds — the occupancy the snap search must
+    /// avoid. Both are taken NOW because the OS drag starts moving the window before `dragBegan`
+    /// fires, and a moved window can no longer be told apart from its own stale bounds.
+    private var pendingGrab: (window: AXWindow, frame: CGRect, occupied: [CGRect])?
     private var dragging = false
     /// Set when the user presses Escape mid-drag: the snap is abandoned and the release applies nothing.
     private var cancelled = false
@@ -70,7 +73,13 @@ public final class DragInteractionManager {
         guard settings.snapEnabled else { return }
         let p = cg(NSEvent.mouseLocation)
         if let w = AXWindow.window(atCG: p), let f = w.frame {
-            pendingGrab = (w, f)
+            // Every other visible window's bounds, dragged window excluded by exact frame match —
+            // reliable only at this instant, while the window still sits at `f`.
+            let occupied = WindowEnumerator.onScreenWindowBounds().filter { b in
+                !(abs(b.minX - f.minX) < 3 && abs(b.minY - f.minY) < 3 &&
+                  abs(b.width - f.width) < 3 && abs(b.height - f.height) < 3)
+            }
+            pendingGrab = (w, f, occupied)
         }
     }
 
@@ -81,7 +90,7 @@ public final class DragInteractionManager {
             guard abs(now.x - down.x) > dragThreshold || abs(now.y - down.y) > dragThreshold else { return }
             dragging = true
             guard let grab = pendingGrab else { return }
-            engine.dragBegan(atCG: cg(down), window: grab.window, originalFrame: grab.frame)
+            engine.dragBegan(atCG: cg(down), window: grab.window, originalFrame: grab.frame, occupied: grab.occupied)
         }
         engine.dragMoved(toCG: cg(now))
     }

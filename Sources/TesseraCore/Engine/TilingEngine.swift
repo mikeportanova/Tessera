@@ -324,25 +324,50 @@ public final class TilingEngine: ObservableObject {
     /// untiled window is swapped onto an existing tile.
     private var draggedOriginalFrame: CGRect?
     private var dragProposal: DragProposal?
+    /// Every visible window's bounds captured at drag start (minus the dragged window) — the
+    /// occupancy the empty-rect search must avoid. Includes windows Tessera has never tiled, which
+    /// the grid alone can't see; captured once because windows don't move mid-drag.
+    private var dragOccupied: [CGRect] = []
 
     /// A window drag started. The `window` and its `originalFrame` are captured by the caller at
     /// mouse-down (before the OS drag moves the window), so the title-bar test uses the grab point
     /// against the window's *original* position — not a stale hit-test after it has already moved.
     /// We only engage when the grab was on the title bar (so dragging a file out of the content area
     /// doesn't move/snap the window).
-    public func dragBegan(atCG point: CGPoint, window: AXWindow, originalFrame: CGRect) {
-        draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil
+    /// `occupied` is the caller's mouse-down snapshot of every OTHER visible window's bounds —
+    /// captured before the OS drag moved the window, when its own footprint could still be excluded.
+    public func dragBegan(atCG point: CGPoint, window: AXWindow, originalFrame: CGRect, occupied: [CGRect]) {
+        draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = []
         // Stale slots would block snapping into now-empty space or offer swaps onto dead windows.
         pruneStaleTiles()
-        guard point.y <= originalFrame.minY + Reflow.titleBarGrabHeight else { return }   // title-bar grab only
+        // Title-bar grab only — and clear of the edge resize handles, so grabbing the top edge or a
+        // top corner to RESIZE never arms a move/swap.
+        guard Reflow.isMoveGrab(point: point, frame: originalFrame) else { return }
+        // Manual moves happen outside the engine, so targets can be stale: re-sync every tile to its
+        // window's live frame so a vacated slot reads as snappable empty space and swap targeting
+        // reflects where windows actually are. The dragged window pins to its mouse-down frame — the
+        // OS drag has already started moving it.
+        grid = Reflow.synced(grid, liveFrames: grid.map { tile in
+            CFEqual(tile.handle.element, window.element) ? originalFrame : AXWindow(tile.handle.element).frame
+        })
         draggedWindow = window
         draggedOriginalFrame = originalFrame
         draggedGridIndex = grid.firstIndex { CFEqual($0.handle.element, window.element) }
+        dragOccupied = occupied
     }
 
     /// The pointer moved mid-drag: preview where the window will land (swap target or snap rect).
     public func dragMoved(toCG point: CGPoint) {
-        guard draggedWindow != nil else { return }
+        guard let dragged = draggedWindow else { return }
+
+        // A window MOVE never changes the window's size; a RESIZE always does. If the size is
+        // drifting, the user grabbed a resize handle we couldn't rule out — abandon the drag so a
+        // resize can never end in a swap or snap. (Reflow picks the resize up afterward.)
+        if let original = draggedOriginalFrame, let live = dragged.frame,
+           abs(live.width - original.width) > 2 || abs(live.height - original.height) > 2 {
+            dragCancelled()
+            return
+        }
         guard let display = DisplayProvider.display(containing: CGRect(x: point.x, y: point.y, width: 1, height: 1)) else {
             snapOverlay.hide(); dragProposal = nil; return
         }
@@ -357,7 +382,7 @@ public final class TilingEngine: ObservableObject {
         }
 
         // Otherwise snap into the open area: largest empty rect, biased toward the pointer, inset for the gap.
-        let occupied = grid.enumerated().filter { $0.offset != draggedGridIndex }.map { $0.element.target }
+        let occupied = dragOccupied
         if let empty = Snap.largestEmptyRect(containing: point, in: display.visibleFrame, avoiding: occupied) {
             var biased = Snap.biased(empty, toward: point)
             // If halving toward an edge left a zone too small to use, offer the whole area instead
@@ -386,13 +411,13 @@ public final class TilingEngine: ObservableObject {
     /// window simply stays wherever the OS drag left it.
     public func dragCancelled() {
         snapOverlay.hide()
-        draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil
+        draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = []
     }
 
     /// The drag ended: apply the previewed proposal.
     public func dragEnded(atCG point: CGPoint) {
         snapOverlay.hide()
-        defer { draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil }
+        defer { draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = [] }
         guard let proposal = dragProposal else { return }
         switch proposal {
         case .swap(let target):
@@ -508,21 +533,33 @@ public final class TilingEngine: ObservableObject {
         guard Date() >= suppressGeometryUntil, !grid.isEmpty else { return }
 
         // Read current frames straight from the grid's live AX handles — no need to enumerate every
-        // window of every app. Find the single tile whose size changed beyond the tolerance.
-        var resizedIndex: Int?
+        // window of every app. Find the single tile whose size changed beyond the tolerance, and any
+        // tiles that merely MOVED (same size, new position).
+        var resizedIndices: [Int] = []
+        var movedOnly: [(index: Int, frame: CGRect)] = []
         var newFrame: CGRect = .zero
         for (idx, tile) in grid.enumerated() {
             guard let liveFrame = AXWindow(tile.handle.element).frame else { continue }
             let sizeDelta = abs(liveFrame.width - tile.target.width) + abs(liveFrame.height - tile.target.height)
+            let moveDelta = abs(liveFrame.minX - tile.target.minX) + abs(liveFrame.minY - tile.target.minY)
             if sizeDelta > Reflow.tolerance {
-                // Only handle a single-window resize; multiple simultaneous changes mean it wasn't a
-                // simple divider drag, so leave it for the next full tile.
-                if resizedIndex != nil { return }
-                resizedIndex = idx
+                resizedIndices.append(idx)
                 newFrame = liveFrame
+            } else if moveDelta > Reflow.tolerance {
+                movedOnly.append((idx, liveFrame))
             }
         }
-        guard let resizedIndex else { return }
+
+        // A pure move means the user relocated the window: its tile follows it, vacating the old
+        // slot so drag-to-snap sees that space as empty again. No reflow — the move was deliberate.
+        for m in movedOnly { grid[m.index].target = m.frame }
+
+        // Only reflow a single-window resize; multiple simultaneous changes mean it wasn't a simple
+        // divider drag, so leave those for the next full tile.
+        guard resizedIndices.count == 1, let resizedIndex = resizedIndices.first else {
+            if !movedOnly.isEmpty { updateCacheFromGrid() }   // manual moves still refine the cache
+            return
+        }
 
         let oldFrame = grid[resizedIndex].target
         grid = Reflow.afterResize(

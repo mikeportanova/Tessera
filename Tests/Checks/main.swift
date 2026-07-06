@@ -460,6 +460,54 @@ do {
     check(abs(ModelPricing.cost(oneM, model: "claude-opus-4-8") - 30) < 0.001, "clearing overrides restores default")
 }
 
+// MARK: - Move grab vs resize handle
+
+do {
+    let frame = CGRect(x: 100, y: 100, width: 800, height: 600)
+    check(Reflow.isMoveGrab(point: CGPoint(x: 500, y: 115), frame: frame),
+          "center of the title bar is a move grab")
+    check(!Reflow.isMoveGrab(point: CGPoint(x: 500, y: 102), frame: frame),
+          "top-edge resize band is NOT a move grab")
+    check(!Reflow.isMoveGrab(point: CGPoint(x: 103, y: 115), frame: frame),
+          "top-left corner resize band is NOT a move grab")
+    check(!Reflow.isMoveGrab(point: CGPoint(x: 897, y: 115), frame: frame),
+          "top-right corner resize band is NOT a move grab")
+    check(!Reflow.isMoveGrab(point: CGPoint(x: 500, y: 400), frame: frame),
+          "content area is NOT a move grab")
+}
+
+// MARK: - Grid sync with live frames (manual moves vacate their slot)
+
+do {
+    let tiles = [
+        makeTile(CGRect(x: 0, y: 0, width: 720, height: 900)),
+        makeTile(CGRect(x: 720, y: 0, width: 720, height: 900)),
+    ]
+    // Window 1 was manually moved far away; window 0 untouched.
+    let movedFrame = CGRect(x: 200, y: 100, width: 720, height: 700)
+    let synced = Reflow.synced(tiles, liveFrames: [tiles[0].target, movedFrame])
+    check(synced[0].target == tiles[0].target, "unmoved tile keeps its target")
+    check(synced[1].target == movedFrame, "manually moved tile adopts its live frame")
+
+    // Jitter inside the tolerance is ignored; a nil live frame leaves the tile untouched.
+    let jitter = tiles[1].target.offsetBy(dx: 2, dy: 2)
+    let jittered = Reflow.synced(tiles, liveFrames: [nil, jitter])
+    check(jittered[1].target == tiles[1].target, "sub-tolerance drift keeps the canonical target")
+    check(jittered[0].target == tiles[0].target, "nil live frame leaves the tile untouched")
+
+    // A resize outside the engine is adopted too.
+    let resized = CGRect(x: 720, y: 0, width: 500, height: 900)
+    let syncedResize = Reflow.synced(tiles, liveFrames: [tiles[0].target, resized])
+    check(syncedResize[1].target == resized, "externally resized tile adopts its live frame")
+
+    // The vacated slot now reads as empty: snapping there gets the space.
+    let display = CGRect(x: 0, y: 0, width: 1440, height: 900)
+    let occupied = [synced[0].target, synced[1].target]
+    let empty = Snap.largestEmptyRect(containing: CGPoint(x: 1300, y: 100), in: display, avoiding: occupied)
+    check(empty != nil, "space vacated by a manual move is snappable again")
+    if let empty { check(empty.minX >= 920 - Reflow.tolerance, "empty rect sits right of the moved window") }
+}
+
 // MARK: - Layout cache
 
 do {

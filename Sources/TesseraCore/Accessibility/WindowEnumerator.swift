@@ -70,6 +70,24 @@ public struct WindowEnumerator {
     }
 
     /// On-screen windows in front-to-back order with their owner pid and bounds (CG top-left).
+    /// Bounds of every on-screen, normal-layer window (CG top-left coords) — the desktop's true
+    /// occupancy, including windows Tessera has never tiled. Layer 0 excludes the menu bar, Dock,
+    /// status items, and overlay panels; our own process (snap overlay etc.) is skipped.
+    public static func onScreenWindowBounds() -> [CGRect] {
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        let ownPid = pid_t(ProcessInfo.processInfo.processIdentifier)
+        return info.compactMap { dict in
+            guard let pid = dict[kCGWindowOwnerPID as String] as? pid_t, pid != ownPid,
+                  (dict[kCGWindowLayer as String] as? Int) == 0,
+                  (dict[kCGWindowAlpha as String] as? CGFloat ?? 1) > 0.05,
+                  let b = dict[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = b["X"], let y = b["Y"], let w = b["Width"], let h = b["Height"],
+                  w > 1, h > 1
+            else { return nil }
+            return CGRect(x: x, y: y, width: w, height: h)
+        }
+    }
+
     private func onScreenZOrder() -> [(pid: pid_t, bounds: CGRect)] {
         let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
         return info.compactMap { dict in

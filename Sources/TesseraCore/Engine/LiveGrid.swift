@@ -39,6 +39,21 @@ public enum Reflow {
         return out
     }
 
+    /// Targets refreshed from the windows' live frames: any tile whose window drifted (was moved or
+    /// resized outside the engine) adopts its live frame, so a stale target neither shadows space
+    /// the user has vacated nor claims the window still sits where Tessera last put it.
+    /// `liveFrames[i]` pairs with `tiles[i]`; nil (window unreadable) leaves that tile untouched.
+    public static func synced(_ tiles: [GridTile], liveFrames: [CGRect?]) -> [GridTile] {
+        var out = tiles
+        for i in out.indices {
+            guard i < liveFrames.count, let live = liveFrames[i] else { continue }
+            let drift = abs(live.minX - out[i].target.minX) + abs(live.minY - out[i].target.minY)
+                      + abs(live.width - out[i].target.width) + abs(live.height - out[i].target.height)
+            if drift > tolerance { out[i].target = live }
+        }
+        return out
+    }
+
     /// Given a window resized from `oldFrame` to `newFrame`, adjust its neighbors so the layout stays
     /// gapless and non-overlapping. Returns updated targets (including the resized tile, now
     /// `newFrame`).
@@ -123,6 +138,22 @@ public enum Reflow {
     /// its title bar, so a drag that *starts* here is a window move; a drag starting below it is
     /// content (e.g. dragging a file out of the window) and must not trigger a swap.
     public static let titleBarGrabHeight: CGFloat = 30
+
+    /// Width of the invisible resize-handle band along a window's edges. A mouse-down this close to
+    /// an edge is (or may be) a RESIZE grab, not a move — it must never arm swap/snap.
+    public static let resizeHandleMargin: CGFloat = 10
+
+    /// Whether a mouse-down at `point` (CG top-left coords) on a window with `frame` is a **move**
+    /// grab: inside the title-bar strip but clear of the resize handles on the top/left/right edges.
+    public static func isMoveGrab(point: CGPoint, frame: CGRect) -> Bool {
+        let bar = CGRect(
+            x: frame.minX + resizeHandleMargin,
+            y: frame.minY + resizeHandleMargin / 2,                      // top resize band is thinner
+            width: frame.width - 2 * resizeHandleMargin,
+            height: titleBarGrabHeight - resizeHandleMargin / 2
+        )
+        return bar.contains(point)
+    }
 
     /// Index of the tile whose **title-bar strip** contains `point` (CG top-left coords), if any.
     public static func indexOfTile(titleBarContaining point: CGPoint, in tiles: [GridTile]) -> Int? {
