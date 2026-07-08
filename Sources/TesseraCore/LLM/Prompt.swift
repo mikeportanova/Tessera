@@ -65,8 +65,21 @@ public enum Prompt {
         default:
             if let side = dims?.sidePreference { line += " | prefers:\(side)" }
         }
-        if includeTitles, !w.title.isEmpty { line += " | \"\(w.title.prefix(50))\"" }
+        if includeTitles {
+            let title = sanitizedTitle(w.title)
+            if !title.isEmpty { line += " | \"\(title.prefix(50))\"" }
+        }
         return line
+    }
+
+    /// Strip newlines/control characters and collapse whitespace runs so an odd (or hostile) window
+    /// title can't inject extra prompt lines. Truncation happens at the call site, after cleanup.
+    private static func sanitizedTitle(_ title: String) -> String {
+        let stripped = String(title.unicodeScalars.map { scalar -> Character in
+            CharacterSet.controlCharacters.contains(scalar) || CharacterSet.newlines.contains(scalar)
+                ? " " : Character(scalar)
+        })
+        return stripped.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
     private static func trailerLines(intent: LayoutIntent) -> [String] {

@@ -50,11 +50,7 @@ public final class UpdateChecker: ObservableObject {
     public func checkNow() async {
         guard !isChecking else { return }
         isChecking = true
-        defer {
-            isChecking = false
-            lastChecked = Date()
-            defaults.set(lastChecked, forKey: Self.lastCheckKey)
-        }
+        defer { isChecking = false }
 
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return }
         var request = URLRequest(url: url)
@@ -66,6 +62,11 @@ public final class UpdateChecker: ObservableObject {
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = json["tag_name"] as? String
         else { return }
+
+        // Only a successful check is stamped, so a failed one (offline, rate-limited) doesn't
+        // suppress retries for a whole week — checkIfStale will simply try again.
+        lastChecked = Date()
+        defaults.set(lastChecked, forKey: Self.lastCheckKey)
 
         let latest = Self.normalize(tag)
         if Self.isVersion(latest, newerThan: Self.currentVersion) {
@@ -173,8 +174,11 @@ public final class UpdateChecker: ObservableObject {
         process.standardOutput = out
         process.standardError = out
         try process.run()
+        // Drain the pipe BEFORE waiting: a child that writes >64KB would fill the pipe buffer and
+        // block, deadlocking waitUntilExit.
+        let data = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let output = String(data: data, encoding: .utf8) ?? ""
         guard process.terminationStatus == 0 else {
             throw UpdateError(failure.isEmpty ? output : failure)
         }
@@ -185,7 +189,10 @@ public final class UpdateChecker: ObservableObject {
     private static func relaunch(appAt appURL: URL) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", "sleep 0.6; /usr/bin/open \"\(appURL.path)\""]
+        // Single-quote the path (escaping any embedded single quote as '\'') so a space or shell
+        // metacharacter in the install path can't break — or inject into — the command.
+        let quotedPath = "'" + appURL.path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        process.arguments = ["-c", "sleep 0.6; /usr/bin/open \(quotedPath)"]
         try? process.run()
         NSApp.terminate(nil)
     }
@@ -197,10 +204,17 @@ public final class UpdateChecker: ObservableObject {
         tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
     }
 
-    /// Numeric dotted-version comparison: "0.2.0" > "0.1.10" > "0.1.9".
+    /// Numeric dotted-version comparison: "0.2.0" > "0.1.10" > "0.1.9". Anything after a "-"
+    /// (pre-release/hotfix suffix, e.g. "0.2.0-beta.1") is ignored: only the numeric dotted parts
+    /// are compared, and equal numerics are NOT newer — so a suffixed tag can never cause an
+    /// update/downgrade loop against the same numeric version.
     public nonisolated static func isVersion(_ candidate: String, newerThan current: String) -> Bool {
-        let a = normalize(candidate).split(separator: ".").map { Int($0) ?? 0 }
-        let b = normalize(current).split(separator: ".").map { Int($0) ?? 0 }
+        func numericParts(_ version: String) -> [Int] {
+            let dotted = normalize(version).split(separator: "-").first ?? ""
+            return dotted.split(separator: ".").map { Int($0) ?? 0 }
+        }
+        let a = numericParts(candidate)
+        let b = numericParts(current)
         for i in 0..<max(a.count, b.count) {
             let x = i < a.count ? a[i] : 0
             let y = i < b.count ? b[i] : 0

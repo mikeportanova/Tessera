@@ -68,8 +68,14 @@ public final class UsageTracker: ObservableObject {
     private let fileURL: URL
     private let retention: TimeInterval = 7 * 24 * 3600   // keep a week; summaries window to 24h
 
-    public init() {
-        let base = FileManager.default
+    /// Injectable clock — a testing seam so checks can drive the 24h/retention windows
+    /// deterministically. The default preserves real behavior.
+    public var now: () -> Date = { Date() }
+
+    /// `directory` is a testing seam: checks point it at a temp dir so they never touch the user's
+    /// real usage.json. The default (nil) preserves the production path.
+    public init(directory: URL? = nil) {
+        let base = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Tessera", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -80,7 +86,7 @@ public final class UsageTracker: ObservableObject {
     public func record(_ usage: TokenUsage, model: String, kind: Kind) {
         guard !usage.isZero else { return }
         prune()
-        events.append(Event(date: Date(), input: usage.input, output: usage.output, model: model, kind: kind))
+        events.append(Event(date: now(), input: usage.input, output: usage.output, model: model, kind: kind))
         save()
     }
 
@@ -92,7 +98,7 @@ public final class UsageTracker: ObservableObject {
     // MARK: - Rolling summaries (trailing 24h)
 
     private var last24h: [Event] {
-        let cutoff = Date().addingTimeInterval(-24 * 3600)
+        let cutoff = now().addingTimeInterval(-24 * 3600)
         return events.filter { $0.date >= cutoff }
     }
 
@@ -130,13 +136,16 @@ public final class UsageTracker: ObservableObject {
     // MARK: - Persistence
 
     private func prune() {
-        let cutoff = Date().addingTimeInterval(-retention)
+        let cutoff = now().addingTimeInterval(-retention)
         events.removeAll { $0.date < cutoff }
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode([Event].self, from: data) else { return }
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard let decoded = try? JSONDecoder().decode([Event].self, from: data) else {
+            quarantineCorruptFile(at: fileURL)   // keep the unreadable file; the next save would overwrite it
+            return
+        }
         events = decoded
         prune()
     }

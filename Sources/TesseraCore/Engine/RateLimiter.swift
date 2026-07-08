@@ -20,6 +20,11 @@ public final class RateLimiter: ObservableObject {
     @Published public private(set) var callsInLastHour: Int = 0
 
     private var timestamps: [Date] = []
+    private var grantExpiry: Date?
+
+    /// Injectable clock — a testing seam so checks can drive the hour window deterministically.
+    /// The default preserves real behavior; production code never overrides it.
+    public var now: () -> Date = { Date() }
 
     public init(maxPerHour: Int = 20) {
         self.maxPerHour = maxPerHour
@@ -32,22 +37,29 @@ public final class RateLimiter: ObservableObject {
 
     /// Record that an AI call just happened.
     public func recordCall() {
-        timestamps.append(Date())
+        timestamps.append(now())
         refreshCount()
     }
 
     /// User approved exceeding the cap; allow `extra` more calls this hour.
     public func grantOverride(extra: Int = 5) {
         grantedExtra += extra
+        grantExpiry = now().addingTimeInterval(3600)
     }
 
     /// Prune timestamps older than an hour and return the live count.
     @discardableResult
     private func currentCount() -> Int {
-        let cutoff = Date().addingTimeInterval(-3600)
+        let cutoff = now().addingTimeInterval(-3600)
         timestamps.removeAll { $0 < cutoff }
-        // Granted overrides are tied to the current burst; once calls age out, let the grant lapse.
-        if timestamps.isEmpty { grantedExtra = 0 }
+        // Grants last for the hour they were approved in (or lapse early once the burst fully
+        // ages out) — steady usage must not keep a one-time approval alive forever.
+        if grantedExtra > 0, timestamps.isEmpty || (grantExpiry.map { $0 <= now() } ?? true) {
+            grantedExtra = 0
+            grantExpiry = nil
+        }
+        // Keep the published count honest even on read paths (menu gauge, approval banner).
+        if callsInLastHour != timestamps.count { callsInLastHour = timestamps.count }
         return timestamps.count
     }
 

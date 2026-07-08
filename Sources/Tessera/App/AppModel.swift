@@ -109,16 +109,41 @@ public final class AppModel: ObservableObject {
             .removeDuplicates()
             .throttle(for: .milliseconds(140), scheduler: DispatchQueue.main, latest: true)
             .sink { [weak self] _ in
-                guard let self, self.engine.hasActiveLayout else { return }
-                Task { await self.engine.retile(useAI: false, interactive: false) }
+                self?.retileForGapChange()
             }
             .store(in: &cancellables)
 
         refreshSavedLayouts()
     }
 
+    /// Set while a deferred gap retile is waiting for an in-flight plan to finish, so retries
+    /// never pile up.
+    private var gapRetileScheduled = false
+
+    /// Re-applies the current layout after a gap change. `engine.retile` silently drops calls while
+    /// a plan is in flight, which would strand the slider's trailing throttled value at an
+    /// intermediate gap — so when planning is in progress, re-check shortly and fire once it's done.
+    private func retileForGapChange() {
+        guard engine.hasActiveLayout else { return }
+        guard engine.status != .planning else {
+            guard !gapRetileScheduled else { return }
+            gapRetileScheduled = true
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard let self else { return }
+                self.gapRetileScheduled = false
+                self.retileForGapChange()   // settings.gap already holds the latest value
+            }
+            return
+        }
+        Task { await engine.retile(useAI: false, interactive: false) }
+    }
+
     public func approveExtraAICalls() {
-        engine.approveExtraAICalls()
+        // Mirrors `engine.approveExtraAICalls()` but respects offline mode the same way
+        // `tileNow()` does — approving budget must not force an AI call the user disabled.
+        rateLimiter.grantOverride(extra: 5)
+        Task { await engine.retile(useAI: !settings.offlineMode) }
     }
 
     /// Flush debounced writes so a quick quit can't drop a recent edit.

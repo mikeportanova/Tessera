@@ -222,10 +222,12 @@ struct MenuContentView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         } else if settings.hasAPIKey {
+            // Clamp to the cap: lowering max-calls below current usage must not exceed the range.
+            let cap = Double(max(1, settings.maxAICallsPerHour))
             HStack(spacing: 8) {
                 Label("AI this hour", systemImage: "brain")
                     .font(.caption).foregroundStyle(.secondary)
-                Gauge(value: Double(rateLimiter.callsInLastHour), in: 0...Double(max(1, settings.maxAICallsPerHour))) {
+                Gauge(value: min(Double(rateLimiter.callsInLastHour), cap), in: 0...cap) {
                     EmptyView()
                 }
                 .gaugeStyle(.accessoryLinearCapacity)

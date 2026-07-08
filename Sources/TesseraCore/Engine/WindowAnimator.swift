@@ -53,7 +53,7 @@ public enum WindowAnimator {
         if !reduceMotion && !moving.isEmpty {
             let frameNanos: UInt64 = 16_666_667   // ~60fps
             let startTime = Date()
-            while true {
+            while !Task.isCancelled {
                 let raw = min(1.0, Date().timeIntervalSince(startTime) / duration)
                 if raw >= 1.0 { break }            // t = 1 is the exact final placement below
                 let t = smootherStep(raw)
@@ -61,7 +61,9 @@ public enum WindowAnimator {
                     item.move.window.setSize(lerpSize(item.start.size, item.move.target.size, t))
                     item.move.window.setPosition(lerpPoint(item.start.origin, item.move.target.origin, t))
                 }
-                try? await Task.sleep(nanoseconds: frameNanos)
+                // On cancellation sleep throws immediately; bail to the final placement rather than
+                // spinning unpaced AX writes for the remainder of `duration`.
+                do { try await Task.sleep(nanoseconds: frameNanos) } catch { break }
             }
         }
 

@@ -102,6 +102,13 @@ public struct ClaudeClient: Sendable {
             throw ClientError.transport("No HTTP response")
         }
         guard (200..<300).contains(http.statusCode) else {
+            // Error bodies look like {"type":"error","error":{"type":…,"message":…}} — surface just
+            // the human-readable message, falling back to the raw body when it doesn't parse.
+            if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errorObj = root["error"] as? [String: Any],
+               let message = errorObj["message"] as? String {
+                throw ClientError.http(status: http.statusCode, body: message)
+            }
             throw ClientError.http(status: http.statusCode, body: String(data: data, encoding: .utf8) ?? "")
         }
 

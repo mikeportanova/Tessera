@@ -21,6 +21,8 @@ echo "▸ Building ($CONFIG)…"
 # with a license error. Retry on the Command Line Tools toolchain so we never need
 # `sudo xcodebuild -license`. (To use Xcode instead, run: sudo xcodebuild -license accept)
 ERRLOG="$(mktemp)"
+# Clean up the temp log on ANY exit — including the CLT-retry path failing under `set -e`.
+trap 'rm -f "$ERRLOG"' EXIT
 if ! swift build -c "$CONFIG" 2>"$ERRLOG"; then
     if grep -qi "license" "$ERRLOG" && [ -d /Library/Developer/CommandLineTools ]; then
         echo "▸ Xcode license not accepted — retrying with the Command Line Tools toolchain."
@@ -28,11 +30,9 @@ if ! swift build -c "$CONFIG" 2>"$ERRLOG"; then
         swift build -c "$CONFIG"
     else
         cat "$ERRLOG" >&2
-        rm -f "$ERRLOG"
         exit 1
     fi
 fi
-rm -f "$ERRLOG"
 
 BIN_PATH="$(swift build -c "$CONFIG" --show-bin-path)"
 

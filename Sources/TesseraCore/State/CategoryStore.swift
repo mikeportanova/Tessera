@@ -22,8 +22,10 @@ public final class CategoryStore: ObservableObject {
         var profiles: [CategoryProfile]
     }
 
-    public init() {
-        let base = FileManager.default
+    /// `directory` is a testing seam: checks point it at a temp dir so they never touch the user's
+    /// real categories.json. The default (nil) preserves the production path.
+    public init(directory: URL? = nil) {
+        let base = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Tessera", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
@@ -40,6 +42,8 @@ public final class CategoryStore: ObservableObject {
             self.profiles = CategoryStore.reconcile(saved: legacy, savedVersion: 1, builtIns: builtIns)
             save()
         } else {
+            // A file that exists but won't decode is set aside, so the next save can't destroy it.
+            if data != nil { quarantineCorruptFile(at: fileURL) }
             self.profiles = builtIns
         }
     }
@@ -91,7 +95,9 @@ public final class CategoryStore: ObservableObject {
     /// Generate a new custom category from a name + example apps, using the LLM to infer sensible
     /// sizing. Falls back to medium defaults if no API key / the call fails. The example apps become
     /// the category's matching keywords so those apps map to it immediately.
-    public func generateCategory(name: String, exampleApps: [String]) async -> CategoryProfile {
+    /// `hasAPIKey` is a testing seam: checks pass `false` to force the offline heuristic path
+    /// deterministically (never spending tokens); the default preserves production behavior.
+    public func generateCategory(name: String, exampleApps: [String], hasAPIKey: Bool = Keychain.hasAPIKey) async -> CategoryProfile {
         let trimmedName = name.trimmingCharacters(in: .whitespaces)
         let id = uniqueId(for: trimmedName)
         let keywords = exampleApps
@@ -101,7 +107,7 @@ public final class CategoryStore: ObservableObject {
         // never crosses the actor boundary. Only Sendable values are passed in.
         let (profile, usage) = await generateCategoryProfile(
             id: id, name: trimmedName.isEmpty ? id : trimmedName,
-            exampleApps: exampleApps, baseKeywords: keywords
+            exampleApps: exampleApps, baseKeywords: keywords, hasAPIKey: hasAPIKey
         )
         usageTracker?.record(usage, model: PlannerModel.sonnet.rawValue, kind: .category)
         return profile
@@ -210,17 +216,26 @@ public final class CategoryStore: ObservableObject {
 
 }
 
+/// Move a persisted file that exists but no longer decodes aside as `<name>.corrupt` (best-effort,
+/// replacing any previous quarantine) before falling back to defaults — the next save would
+/// otherwise overwrite it, and the original stays recoverable for the user.
+func quarantineCorruptFile(at url: URL) {
+    let backup = url.appendingPathExtension("corrupt")
+    try? FileManager.default.removeItem(at: backup)
+    try? FileManager.default.moveItem(at: url, to: backup)
+}
+
 /// Nonisolated LLM call to infer sizing for a new category. Builds its tool schema locally so no
 /// non-Sendable value crosses an actor boundary, and returns a heuristic default when offline.
 private func generateCategoryProfile(
-    id: String, name: String, exampleApps: [String], baseKeywords: [String]
+    id: String, name: String, exampleApps: [String], baseKeywords: [String], hasAPIKey: Bool
 ) async -> (CategoryProfile, TokenUsage) {
     var profile = CategoryProfile(
         id: id, name: name, preferredWidthFraction: 0.4,
         minWidth: 340, maxWidth: 1300, minHeight: 240, maxHeight: 1400,
         bundleIds: [], keywords: baseKeywords, isBuiltIn: false
     )
-    guard Keychain.hasAPIKey, !exampleApps.isEmpty else { return (profile, .zero) }
+    guard hasAPIKey, !exampleApps.isEmpty else { return (profile, .zero) }
 
     let schema: [String: Any] = [
         "type": "object",
@@ -251,11 +266,16 @@ private func generateCategoryProfile(
             toolSchema: schema
         )
         let input = result.toolInput
+        // Clamp every model-supplied dimension to a sane positive range, and keep min ≤ max, so a
+        // hallucinated value (0, negative, or absurd) can't produce an unusable category.
+        func sane(_ v: Double) -> CGFloat { CGFloat(min(5000, max(100, v))) }
         if let f = (input["preferredWidthFraction"] as? NSNumber)?.doubleValue { profile.preferredWidthFraction = min(0.7, max(0.1, f)) }
-        if let v = (input["minWidth"] as? NSNumber)?.doubleValue { profile.minWidth = CGFloat(v) }
-        if let v = (input["maxWidth"] as? NSNumber)?.doubleValue { profile.maxWidth = CGFloat(v) }
-        if let v = (input["minHeight"] as? NSNumber)?.doubleValue { profile.minHeight = CGFloat(v) }
-        if let v = (input["maxHeight"] as? NSNumber)?.doubleValue { profile.maxHeight = CGFloat(v) }
+        if let v = (input["minWidth"] as? NSNumber)?.doubleValue { profile.minWidth = sane(v) }
+        if let v = (input["maxWidth"] as? NSNumber)?.doubleValue { profile.maxWidth = sane(v) }
+        if let v = (input["minHeight"] as? NSNumber)?.doubleValue { profile.minHeight = sane(v) }
+        if let v = (input["maxHeight"] as? NSNumber)?.doubleValue { profile.maxHeight = sane(v) }
+        if profile.minWidth > profile.maxWidth { profile.minWidth = profile.maxWidth }
+        if profile.minHeight > profile.maxHeight { profile.minHeight = profile.maxHeight }
         if let kws = input["keywords"] as? [String] { profile.keywords = Array(Set(baseKeywords + kws.map { $0.lowercased() })) }
         if let bids = input["bundleIds"] as? [String] { profile.bundleIds = bids }
         return (profile, result.usage)

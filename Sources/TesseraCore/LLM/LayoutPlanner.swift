@@ -141,16 +141,12 @@ public struct LayoutPlanner: Sendable {
         let byDisplayId = Dictionary(uniqueKeysWithValues: displays.enumerated().map { (Prompt.displayID($0.offset), $0.element) })
 
         var tiles: [Tile] = []
+        var seenIds: Set<String> = []
         for raw in rawTiles {
-            guard let idString = raw["window_id"] as? String,
-                  let window = byId[idString],
-                  let x = (raw["x"] as? NSNumber)?.doubleValue,
-                  let y = (raw["y"] as? NSNumber)?.doubleValue,
-                  let w = (raw["width"] as? NSNumber)?.doubleValue,
-                  let h = (raw["height"] as? NSNumber)?.doubleValue
+            guard let (idString, rect) = TileParsing.validated(raw, seen: &seenIds),
+                  let window = byId[idString]
             else { continue }
 
-            let rect = CGRect(x: x, y: y, width: w, height: h)
             let display = (raw["display"] as? String).flatMap { byDisplayId[$0] }
                 ?? displays.max { rect.intersectionArea($0.visibleFrame) < rect.intersectionArea($1.visibleFrame) }
                 ?? displays[0]
@@ -159,7 +155,7 @@ public struct LayoutPlanner: Sendable {
             let maxW = catalog.maxWidth(id: window.categoryId, bundleId: window.bundleId, usableWidth: bounds.width, learned: learned)
             let maxH = catalog.maxHeight(id: window.categoryId, bundleId: window.bundleId, usableHeight: bounds.height, learned: learned)
             let sized = CGRect(x: rect.minX, y: rect.minY, width: min(rect.width, maxW), height: min(rect.height, maxH))
-            tiles.append(Tile(windowId: window.id, frame: clamp(sized, to: bounds)))
+            tiles.append(Tile(windowId: window.id, frame: TileParsing.clamp(sized, to: bounds)))
         }
         return tiles
     }
@@ -180,13 +176,10 @@ public struct LayoutPlanner: Sendable {
         let byId = Dictionary(uniqueKeysWithValues: windows.enumerated().map { (Prompt.shortID($0.offset), $0.element) })
 
         var tiles: [Tile] = []
+        var seenIds: Set<String> = []
         for raw in rawTiles {
-            guard let idString = raw["window_id"] as? String,
-                  let window = byId[idString],
-                  let x = (raw["x"] as? NSNumber)?.doubleValue,
-                  let y = (raw["y"] as? NSNumber)?.doubleValue,
-                  let w = (raw["width"] as? NSNumber)?.doubleValue,
-                  let h = (raw["height"] as? NSNumber)?.doubleValue
+            guard let (idString, rect) = TileParsing.validated(raw, seen: &seenIds),
+                  let window = byId[idString]
             else { continue }
 
             // Safety net: even if the model ignores the instruction, never let a window exceed its
@@ -194,18 +187,44 @@ public struct LayoutPlanner: Sendable {
             // top-left corner (preserving the top-left-anchored arrangement).
             let maxW = catalog.maxWidth(id: window.categoryId, bundleId: window.bundleId, usableWidth: bounds.width, learned: learned)
             let maxH = catalog.maxHeight(id: window.categoryId, bundleId: window.bundleId, usableHeight: bounds.height, learned: learned)
-            let rect = CGRect(x: x, y: y, width: min(w, maxW), height: min(h, maxH))
-            tiles.append(Tile(windowId: window.id, frame: clamp(rect, to: bounds)))
+            let sized = CGRect(x: rect.minX, y: rect.minY, width: min(rect.width, maxW), height: min(rect.height, maxH))
+            tiles.append(Tile(windowId: window.id, frame: TileParsing.clamp(sized, to: bounds)))
         }
         return tiles
     }
+}
 
-    /// Keep a frame inside `bounds`, preserving size where possible.
-    private func clamp(_ rect: CGRect, to bounds: CGRect) -> CGRect {
-        let width = min(rect.width, bounds.width)
-        let height = min(rect.height, bounds.height)
-        let x = min(max(rect.origin.x, bounds.minX), bounds.maxX - width)
-        let y = min(max(rect.origin.y, bounds.minY), bounds.maxY - height)
+/// Per-tile validation and clamping shared by `LayoutPlanner`'s parsers. Public ONLY as a testing
+/// seam — the checks executable can see just the package's public API — not intended as API for
+/// other callers.
+public enum TileParsing {
+    /// Validate one raw `emit_layout` tile: requires a `window_id` string not already in `seen` and
+    /// finite `x`/`y`/`width`/`height` (via the NSNumber bridge) with width/height >= 1 —
+    /// degenerate/negative sizes are hallucinations. Duplicate window_ids are rejected (first valid
+    /// entry wins); an entry rejected for bad geometry does NOT consume its id. On success the id
+    /// is recorded in `seen` and returned with the raw rect.
+    public static func validated(_ raw: [String: Any], seen: inout Set<String>) -> (id: String, rect: CGRect)? {
+        guard let id = raw["window_id"] as? String,
+              let x = (raw["x"] as? NSNumber)?.doubleValue,
+              let y = (raw["y"] as? NSNumber)?.doubleValue,
+              let w = (raw["width"] as? NSNumber)?.doubleValue,
+              let h = (raw["height"] as? NSNumber)?.doubleValue,
+              x.isFinite, y.isFinite, w.isFinite, h.isFinite,
+              w >= 1, h >= 1,
+              seen.insert(id).inserted
+        else { return nil }
+        return (id, CGRect(x: x, y: y, width: w, height: h))
+    }
+
+    /// Keep a frame inside `bounds`, preserving size where possible. Defensive backstop: `validated`
+    /// already rejects non-finite/degenerate sizes, but never emit one from here either way.
+    public static func clamp(_ rect: CGRect, to bounds: CGRect) -> CGRect {
+        let width = max(1, min(rect.width, bounds.width))
+        let height = max(1, min(rect.height, bounds.height))
+        var x = min(max(rect.origin.x, bounds.minX), bounds.maxX - width)
+        var y = min(max(rect.origin.y, bounds.minY), bounds.maxY - height)
+        if !x.isFinite { x = bounds.minX }
+        if !y.isFinite { y = bounds.minY }
         return CGRect(x: x, y: y, width: width, height: height)
     }
 }

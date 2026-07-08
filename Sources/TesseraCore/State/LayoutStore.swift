@@ -20,8 +20,10 @@ public final class LayoutStore {
         return d
     }()
 
-    public init() {
-        let base = FileManager.default
+    /// `directory` is a testing seam: checks point it at a temp dir so they never touch the user's
+    /// real saved layouts. The default (nil) preserves the production path.
+    public init(directory: URL? = nil) {
+        let base = directory ?? FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first!
             .appendingPathComponent("Tessera", isDirectory: true)
@@ -73,15 +75,37 @@ public final class LayoutStore {
     /// Each entry is matched to a window by bundle id, preferring the closest title; each open
     /// window is consumed at most once.
     public func resolveTiles(for layout: SavedLayout, windows: [ManagedWindow]) -> [Tile] {
+        resolveTiles(for: layout, windows: windows, displays: [])
+    }
+
+    /// Display-aware variant: each restored frame is clamped into the visible frame of the display
+    /// it overlaps most (falling back to the first display), so a layout saved on a different
+    /// monitor arrangement can't restore a window off-screen. An empty `displays` skips clamping.
+    public func resolveTiles(for layout: SavedLayout, windows: [ManagedWindow], displays: [DisplayInfo]) -> [Tile] {
         var available = windows
         var tiles: [Tile] = []
 
         for entry in layout.entries {
             guard let matchIndex = bestMatchIndex(for: entry, in: available) else { continue }
             let window = available.remove(at: matchIndex)
-            tiles.append(Tile(windowId: window.id, frame: entry.frame))
+            tiles.append(Tile(windowId: window.id, frame: clamped(entry.frame, displays: displays)))
         }
         return tiles
+    }
+
+    /// Shrink a frame to fit its best-overlap display's visible frame, then pin the origin inside
+    /// the bounds (same math as `TileParsing.clamp`). No displays → return the frame unchanged.
+    private func clamped(_ frame: CGRect, displays: [DisplayInfo]) -> CGRect {
+        guard !displays.isEmpty else { return frame }
+        let display = displays.max {
+            frame.intersectionArea($0.visibleFrame) < frame.intersectionArea($1.visibleFrame)
+        } ?? displays[0]
+        let bounds = display.visibleFrame
+        let width = min(frame.width, bounds.width)
+        let height = min(frame.height, bounds.height)
+        let x = min(max(frame.origin.x, bounds.minX), bounds.maxX - width)
+        let y = min(max(frame.origin.y, bounds.minY), bounds.maxY - height)
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 
     private func bestMatchIndex(for entry: SavedLayout.Entry, in windows: [ManagedWindow]) -> Int? {

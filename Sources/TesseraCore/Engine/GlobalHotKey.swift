@@ -60,10 +60,19 @@ public final class HotKeyManager {
 
     public var onAction: ((Action) -> Void)?
 
-    private var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]
-    private var handlerRef: EventHandlerRef?
+    // nonisolated(unsafe): mutated only on the main actor; opted out of isolation checking solely
+    // so the (nonisolated) deinit below can unregister them.
+    private nonisolated(unsafe) var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]
+    private nonisolated(unsafe) var handlerRef: EventHandlerRef?
 
     public init() {}
+
+    deinit {
+        // App-lifetime in practice, but if an instance is ever recreated, a still-installed Carbon
+        // handler would hold a dangling `passUnretained` context — use-after-free on the next press.
+        for (_, ref) in hotKeyRefs { UnregisterEventHotKey(ref) }
+        if let handlerRef { RemoveEventHandler(handlerRef) }
+    }
 
     /// (Re-)register the full shortcut set: the user's tile shortcut, the Magnet-style quick-snap
     /// keys when enabled, and undo (always on). Safe to call repeatedly.

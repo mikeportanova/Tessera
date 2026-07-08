@@ -118,8 +118,11 @@ public final class DimensionMemory: ObservableObject {
     // MARK: - Persistence
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder().decode(Store.self, from: data) else { return }
+        guard let data = try? Data(contentsOf: fileURL) else { return }
+        guard let decoded = try? JSONDecoder().decode(Store.self, from: data) else {
+            quarantineCorruptFile(at: fileURL)   // keep the unreadable file; the next save would overwrite it
+            return
+        }
         store = decoded
         sampleCount = store.byBundle.values.reduce(0) { $0 + $1.samples }
     }

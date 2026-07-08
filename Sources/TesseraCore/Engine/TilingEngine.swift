@@ -57,6 +57,10 @@ public final class TilingEngine: ObservableObject {
 
     /// Guard against overlapping planning passes.
     private var isPlanning = false
+    /// A window-moving animation (undo/snap/swap/restore) is in flight. Other window-moving
+    /// operations are dropped while set, instead of mutating `grid` mid-pass and racing the
+    /// animation for the same windows.
+    private var isApplying = false
     /// Ignore geometry notifications until this instant — set after we apply frames ourselves, so
     /// our own moves don't masquerade as user resizes.
     private var suppressGeometryUntil = Date.distantPast
@@ -78,7 +82,7 @@ public final class TilingEngine: ObservableObject {
     /// - Parameter interactive: false for automatic triggers (auto-arrange, live gap changes) —
     ///   skips the optional preview so the user isn't interrupted by a prompt they didn't ask for.
     public func retile(useAI: Bool = true, interactive: Bool = true) async {
-        guard !isPlanning else { return }
+        guard !isPlanning, !isApplying else { return }
         isPlanning = true
         status = .planning
         defer { isPlanning = false; progressOverlay.hide() }
@@ -180,6 +184,10 @@ public final class TilingEngine: ObservableObject {
         usageTracker.record(passUsage, model: settings.model.rawValue, kind: .tiling)
         progressOverlay.hide()
 
+        // The auto-arrange debouncer cancels superseded passes; a cancelled pass must not apply its
+        // stale plan (usage above is still recorded — those tokens were spent either way).
+        if Task.isCancelled { status = .idle; return }
+
         await applyTiles(newGrid, interactive: interactive)
 
         // Only cache layouts the AI actually produced — the offline tiler is already instant, and a
@@ -215,7 +223,12 @@ public final class TilingEngine: ObservableObject {
                                 clamp: DisplayProvider.display(containing: $0.target)?.visibleFrame)
         }
         suppressGeometry(for: WindowAnimator.duration)
+        isApplying = true
         await WindowAnimator.animate(moves)
+        isApplying = false
+        // Re-arm from the animation's actual end: with many windows or slow apps the AX sets can
+        // outlast the estimate above, and late move/resize echoes must not read as user edits.
+        suppressGeometry()
         grid = tiles
         status = .applied(movedWindows: tiles.count)
     }
@@ -234,7 +247,7 @@ public final class TilingEngine: ObservableObject {
 
     /// Revert the last tiling/snap/swap: slide every affected window back to where it was.
     public func undoLastLayout() {
-        guard canUndo else { return }
+        guard canUndo, !isPlanning, !isApplying else { return }
         let moves = undoFrames.compactMap { entry -> WindowAnimator.Move? in
             let win = AXWindow(entry.handle.element)
             guard win.isAlive else { return nil }
@@ -247,8 +260,11 @@ public final class TilingEngine: ObservableObject {
         canUndo = false
         guard !moves.isEmpty else { return }
         suppressGeometry(for: WindowAnimator.duration)
+        isApplying = true
         Task { @MainActor in
             await WindowAnimator.animate(moves)
+            isApplying = false
+            suppressGeometry()
             status = .applied(movedWindows: moves.count)
         }
     }
@@ -261,6 +277,7 @@ public final class TilingEngine: ObservableObject {
 
     /// Move the focused window to a half/maximized frame on its display. No AI, no enumeration.
     public func quickSnap(_ action: QuickSnapAction) {
+        guard !isPlanning, !isApplying else { return }
         guard let win = focusedWindow(), let frame = win.frame,
               let display = DisplayProvider.display(containing: frame) ?? DisplayProvider.displays().first
         else { return }
@@ -276,8 +293,11 @@ public final class TilingEngine: ObservableObject {
         upsertGrid(element: win.element, frame: target)
         recordPlacement(of: win.element, frame: target, in: vf)
         suppressGeometry(for: WindowAnimator.duration)
+        isApplying = true
         Task { @MainActor in
             await WindowAnimator.animate([WindowAnimator.Move(window: win, target: target, clamp: vf)])
+            isApplying = false
+            suppressGeometry()
             status = .applied(movedWindows: 1)
         }
     }
@@ -311,18 +331,26 @@ public final class TilingEngine: ObservableObject {
     /// User approved exceeding the hourly cap → grant headroom and try again.
     public func approveExtraAICalls() {
         rateLimiter.grantOverride(extra: 5)
-        Task { await retile() }
+        // Honor offline mode even here — the approval banner may still be visible after the user
+        // toggled it, and "no AI" must mean no Claude call.
+        Task { await retile(useAI: !settings.offlineMode) }
     }
 
     // MARK: - Drag-to-snap (Magnet-style) + swap
 
-    private enum DragProposal { case snap(CGRect); case swap(targetIndex: Int) }
+    /// Swap targets are identified by their AX handle, not a grid index — the grid can be pruned or
+    /// rebuilt mid-drag (auto-retile, windows closing anywhere), which shifts indices under a
+    /// multi-second drag. Indices are re-resolved at drop time.
+    private enum DragProposal { case snap(CGRect); case swap(target: AXWindowHandle) }
     private let snapOverlay = SnapOverlay()
     private var draggedWindow: AXWindow?
-    private var draggedGridIndex: Int?
     /// The dragged window's frame at grab time — used to reposition the displaced window when an
     /// untiled window is swapped onto an existing tile.
     private var draggedOriginalFrame: CGRect?
+    /// Where the drag started (CG coords). A real window move keeps the window under the cursor; a
+    /// content drag from the same strip (URL bar, tab, text selection) never moves the window — the
+    /// divergence is how we tell them apart, since a pixel-row heuristic can't.
+    private var dragStartPoint: CGPoint?
     private var dragProposal: DragProposal?
     /// Every visible window's bounds captured at drag start (minus the dragged window) — the
     /// occupancy the empty-rect search must avoid. Includes windows Tessera has never tiled, which
@@ -337,7 +365,10 @@ public final class TilingEngine: ObservableObject {
     /// `occupied` is the caller's mouse-down snapshot of every OTHER visible window's bounds —
     /// captured before the OS drag moved the window, when its own footprint could still be excluded.
     public func dragBegan(atCG point: CGPoint, window: AXWindow, originalFrame: CGRect, occupied: [CGRect]) {
-        draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = []
+        draggedWindow = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = []
+        // While the engine itself is moving windows, a grab is as likely to be catching a window
+        // mid-slide as a deliberate drag — don't arm.
+        guard !isPlanning, !isApplying else { return }
         // Stale slots would block snapping into now-empty space or offer swaps onto dead windows.
         pruneStaleTiles()
         // Title-bar grab only — and clear of the edge resize handles, so grabbing the top edge or a
@@ -352,7 +383,7 @@ public final class TilingEngine: ObservableObject {
         })
         draggedWindow = window
         draggedOriginalFrame = originalFrame
-        draggedGridIndex = grid.firstIndex { CFEqual($0.handle.element, window.element) }
+        dragStartPoint = point
         dragOccupied = occupied
     }
 
@@ -375,8 +406,8 @@ public final class TilingEngine: ObservableObject {
         // Dropping onto another tile swaps into its slot. Works whether the dragged window is already
         // tiled (a straight exchange) or brand-new/untiled (it adopts the slot; see dragEnded) — so a
         // just-opened app can be dropped onto a tile even when the desktop is fully occupied.
-        if let target = grid.firstIndex(where: { $0.target.contains(point) }), target != draggedGridIndex {
-            dragProposal = .swap(targetIndex: target)
+        if let target = grid.firstIndex(where: { $0.target.contains(point) && !CFEqual($0.handle.element, dragged.element) }) {
+            dragProposal = .swap(target: grid[target].handle)
             snapOverlay.show(cgFrame: grid[target].target)
             return
         }
@@ -411,19 +442,34 @@ public final class TilingEngine: ObservableObject {
     /// window simply stays wherever the OS drag left it.
     public func dragCancelled() {
         snapOverlay.hide()
-        draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = []
+        draggedWindow = nil; draggedOriginalFrame = nil; dragStartPoint = nil; dragProposal = nil; dragOccupied = []
     }
 
     /// The drag ended: apply the previewed proposal.
     public func dragEnded(atCG point: CGPoint) {
         snapOverlay.hide()
-        defer { draggedWindow = nil; draggedGridIndex = nil; draggedOriginalFrame = nil; dragProposal = nil; dragOccupied = [] }
-        guard let proposal = dragProposal else { return }
+        defer { draggedWindow = nil; draggedOriginalFrame = nil; dragStartPoint = nil; dragProposal = nil; dragOccupied = [] }
+        guard let proposal = dragProposal, !isPlanning, !isApplying else { return }
+        // Content drags (URL from the address bar, a tab, a proxy icon) start in the same title
+        // strip as a window move but never move the window — if the cursor traveled and the window
+        // didn't, apply nothing. Tested HERE, at drop, where the position read is authoritative:
+        // mid-drag AX position reads lag or coalesce in many apps, so an early-out on divergence
+        // cancels genuine fast drags.
+        if let win = draggedWindow, let original = draggedOriginalFrame, let start = dragStartPoint,
+           let live = win.frame,
+           hypot(point.x - start.x, point.y - start.y) > 25,
+           hypot(live.minX - original.minX, live.minY - original.minY) < 3 {
+            return
+        }
         switch proposal {
-        case .swap(let target):
-            guard grid.indices.contains(target) else { return }
+        case .swap(let targetHandle):
+            // Re-resolve both indices at drop time — see DragProposal's doc comment.
+            guard AXWindow(targetHandle.element).isAlive,
+                  let target = grid.firstIndex(where: { CFEqual($0.handle.element, targetHandle.element) })
+            else { return }
             let moves: [WindowAnimator.Move]
-            if let from = draggedGridIndex {
+            if let win = draggedWindow,
+               let from = grid.firstIndex(where: { CFEqual($0.handle.element, win.element) }) {
                 // Both windows are tiled → straight exchange of their slots.
                 guard from != target else { return }
                 captureUndo(handles: [grid[from].handle, grid[target].handle])
@@ -451,8 +497,11 @@ public final class TilingEngine: ObservableObject {
             }
             updateCacheFromGrid()
             suppressGeometry(for: WindowAnimator.duration)
+            isApplying = true
             Task { @MainActor in
                 await WindowAnimator.animate(moves)
+                isApplying = false
+                suppressGeometry()
                 status = .applied(movedWindows: moves.count)
             }
         case .snap(let frame):
@@ -463,8 +512,11 @@ public final class TilingEngine: ObservableObject {
             upsertGrid(element: win.element, frame: frame)
             recordPlacement(of: win.element, frame: frame, in: area)
             updateCacheFromGrid()
+            isApplying = true
             Task { @MainActor in
                 await WindowAnimator.animate([WindowAnimator.Move(window: win, target: frame, clamp: area)])
+                isApplying = false
+                suppressGeometry()
                 status = .applied(movedWindows: 1)
             }
         }
@@ -570,9 +622,11 @@ public final class TilingEngine: ObservableObject {
             gap: CGFloat(settings.gap)
         )
 
-        // Apply the reflowed neighbors (not the resized window itself — the user already sized it).
+        // Apply the reflowed neighbors (not the resized window itself — the user already sized it),
+        // clamped to the display so a min-size-pinned neighbor can't be pushed off-screen.
         let neighbors = grid.enumerated().filter { $0.offset != resizedIndex }.map { $0.element }
-        applyAndSuppress { applier.applyGrid(neighbors) }
+        let area = DisplayProvider.display(containing: newFrame)?.visibleFrame
+        applyAndSuppress { applier.applyGrid(neighbors, clampTo: area) }
 
         // Learn the new proportions (and position) relative to the display's usable area.
         if let display = DisplayProvider.display(containing: newFrame) {
@@ -603,21 +657,27 @@ public final class TilingEngine: ObservableObject {
     }
 
     public func restoreLayout(name: String) {
+        guard !isPlanning, !isApplying else { return }
         guard let layout = store.layout(named: name) else {
             status = .failed("No saved layout named \(name)")
             return
         }
         let windows = enumerator.managedWindows(catalog: categoryStore.snapshot())
-        let tiles = store.resolveTiles(for: layout, windows: windows)
+        // Clamp against the *current* displays — the layout may have been saved on a monitor
+        // arrangement that no longer exists, and verbatim frames would land windows off-screen.
+        let tiles = store.resolveTiles(for: layout, windows: windows, displays: DisplayProvider.displays())
         let plan = LayoutPlan(displaySignature: layout.displaySignature, tiles: tiles)
         let gridTilesForPlan = gridTiles(from: plan, windows: windows)
         captureUndo(handles: gridTilesForPlan.map(\.handle))
         grid = gridTilesForPlan
         suppressGeometry(for: WindowAnimator.duration)
+        isApplying = true
         Task { @MainActor in
             await WindowAnimator.animate(
                 gridTilesForPlan.map { WindowAnimator.Move(window: AXWindow($0.handle.element), target: $0.target) }
             )
+            isApplying = false
+            suppressGeometry()
             status = .applied(movedWindows: tiles.count)
         }
     }

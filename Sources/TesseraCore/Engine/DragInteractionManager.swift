@@ -35,6 +35,7 @@ public final class DragInteractionManager {
     }
 
     public func start() {
+        stop()   // idempotent: a second start() must not orphan the first set of monitors
         let down = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] _ in
             MainActor.assumeIsolated { self?.handleDown() }
         }

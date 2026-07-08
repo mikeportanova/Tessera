@@ -85,11 +85,17 @@ public enum Reflow {
         for k in out.indices where k != resizedIndex {
             var f = out[k].target
 
+            // When honoring a moved divider would shrink a tile below `minSize`, the tile pins at
+            // min size with its FAR edge held in place (the divider stops short for it), rather
+            // than letting its far edge follow the origin past its old bound — that would shove it
+            // over the next column/row or off-screen. The bounded overlap that remains is with the
+            // resized window itself, which the user is actively dragging.
+
             // Vertical divider at the resized window's RIGHT edge.
             if abs(dRight) > 0.5 {
                 if approxEqual(f.minX, oldFrame.maxX + gap) {          // tile to the right → move its left edge
-                    let newMinX = newFrame.maxX + gap
-                    f = CGRect(x: newMinX, y: f.minY, width: max(minSize.width, f.maxX - newMinX), height: f.height)
+                    let newMinX = min(newFrame.maxX + gap, f.maxX - minSize.width)
+                    f = CGRect(x: newMinX, y: f.minY, width: f.maxX - newMinX, height: f.height)
                 } else if approxEqual(f.maxX, oldFrame.maxX) {         // tile sharing that right edge → move its right edge
                     f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newFrame.maxX - f.minX), height: f.height)
                 }
@@ -100,15 +106,15 @@ public enum Reflow {
                     let newMaxX = newFrame.minX - gap
                     f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newMaxX - f.minX), height: f.height)
                 } else if approxEqual(f.minX, oldFrame.minX) {         // tile sharing that left edge → move its left edge
-                    let newMinX = newFrame.minX
-                    f = CGRect(x: newMinX, y: f.minY, width: max(minSize.width, f.maxX - newMinX), height: f.height)
+                    let newMinX = min(newFrame.minX, f.maxX - minSize.width)
+                    f = CGRect(x: newMinX, y: f.minY, width: f.maxX - newMinX, height: f.height)
                 }
             }
             // Horizontal divider at the resized window's BOTTOM edge.
             if abs(dBottom) > 0.5 {
                 if approxEqual(f.minY, oldFrame.maxY + gap) {          // tile below → move its top edge
-                    let newMinY = newFrame.maxY + gap
-                    f = CGRect(x: f.minX, y: newMinY, width: f.width, height: max(minSize.height, f.maxY - newMinY))
+                    let newMinY = min(newFrame.maxY + gap, f.maxY - minSize.height)
+                    f = CGRect(x: f.minX, y: newMinY, width: f.width, height: f.maxY - newMinY)
                 } else if approxEqual(f.maxY, oldFrame.maxY) {         // tile sharing that bottom edge → move its bottom edge
                     f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newFrame.maxY - f.minY))
                 }
@@ -119,8 +125,8 @@ public enum Reflow {
                     let newMaxY = newFrame.minY - gap
                     f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newMaxY - f.minY))
                 } else if approxEqual(f.minY, oldFrame.minY) {         // tile sharing that top edge → move its top edge
-                    let newMinY = newFrame.minY
-                    f = CGRect(x: f.minX, y: newMinY, width: f.width, height: max(minSize.height, f.maxY - newMinY))
+                    let newMinY = min(newFrame.minY, f.maxY - minSize.height)
+                    f = CGRect(x: f.minX, y: newMinY, width: f.width, height: f.maxY - newMinY)
                 }
             }
 

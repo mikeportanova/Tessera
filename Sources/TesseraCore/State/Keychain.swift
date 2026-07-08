@@ -7,22 +7,35 @@ public enum Keychain {
     private static let service = "com.fileread.Tessera"
     private static let account = "anthropic-api-key"
 
-    public static func setAPIKey(_ key: String) {
-        let data = Data(key.utf8)
+    /// Store (or clear, when empty) the API key. Whitespace/newlines are trimmed — a pasted key
+    /// often carries a trailing newline that would break authentication. Returns whether the
+    /// keychain now reflects the request; callers that ignore it can consult `hasAPIKey`.
+    @discardableResult
+    public static func setAPIKey(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         // Delete any existing item first so we can cleanly re-add.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(query as CFDictionary)
+        let deleteStatus = SecItemDelete(query as CFDictionary)
+        if deleteStatus != errSecSuccess, deleteStatus != errSecItemNotFound {
+            NSLog("[Tessera] Keychain delete failed (\(deleteStatus))")
+        }
 
-        guard !key.isEmpty else { return }
+        guard !trimmed.isEmpty else {
+            return deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound
+        }
 
         var add = query
-        add[kSecValueData as String] = data
+        add[kSecValueData as String] = Data(trimmed.utf8)
         add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(add as CFDictionary, nil)
+        let addStatus = SecItemAdd(add as CFDictionary, nil)
+        if addStatus != errSecSuccess {
+            NSLog("[Tessera] Keychain add failed (\(addStatus))")
+        }
+        return addStatus == errSecSuccess
     }
 
     public static func apiKey() -> String? {
@@ -34,7 +47,13 @@ public enum Keychain {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        // errSecItemNotFound simply means no key is set. Any other failure (e.g. a locked keychain)
+        // also returns nil, so planning degrades to the offline fallback rather than erroring.
+        if status != errSecSuccess, status != errSecItemNotFound {
+            NSLog("[Tessera] Keychain read failed (\(status))")
+        }
+        guard status == errSecSuccess,
               let data = result as? Data,
               let key = String(data: data, encoding: .utf8),
               !key.isEmpty

@@ -35,7 +35,8 @@ private struct GeneralPrefs: View {
                 HStack {
                     SecureField(settings.hasAPIKey ? "•••••••••••• (stored in Keychain)" : "sk-ant-…", text: $apiKeyField)
                     Button("Save") {
-                        settings.updateAPIKey(apiKeyField); apiKeyField = ""; savedConfirmation = true
+                        settings.updateAPIKey(apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines))
+                        apiKeyField = ""; savedConfirmation = true
                     }
                     .disabled(apiKeyField.trimmingCharacters(in: .whitespaces).isEmpty)
                     if settings.hasAPIKey {
@@ -143,6 +144,9 @@ private struct GeneralPrefs: View {
 private struct AppsPrefs: View {
     @EnvironmentObject private var rules: AppRulesStore
 
+    /// Bumped when apps launch or quit so the running-apps list recomputes while the window is open.
+    @State private var runningAppsGeneration = 0
+
     /// Currently-running regular apps plus any apps with an existing rule (even if not running).
     private var apps: [(bundleId: String, name: String, icon: NSImage?)] {
         var seen: [String: (name: String, icon: NSImage?)] = [:]
@@ -159,6 +163,7 @@ private struct AppsPrefs: View {
 
     var body: some View {
         Form {
+            let _ = runningAppsGeneration   // depend on the generation so launch/quit refreshes the list
             Section {
                 Text("Set how each app participates in tiling. Float keeps an app out of every layout; pins force it to a side.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -187,6 +192,12 @@ private struct AppsPrefs: View {
             }
         }
         .formStyle(.grouped)
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didLaunchApplicationNotification)) { _ in
+            runningAppsGeneration &+= 1
+        }
+        .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)) { _ in
+            runningAppsGeneration &+= 1
+        }
     }
 }
 
@@ -381,12 +392,28 @@ private struct CategoryDetail: View {
     }
 
     private func rangeRow(_ label: String, min: Binding<CGFloat>, max: Binding<CGFloat>, bound: ClosedRange<CGFloat>) -> some View {
-        HStack(spacing: 12) {
+        // Cross-validate so min can never exceed max: raising min above max pushes max up, and
+        // lowering max below min pushes min down. Both writes persist via `bind`'s setter.
+        let minBinding = Binding<CGFloat>(
+            get: { min.wrappedValue },
+            set: { newValue in
+                min.wrappedValue = newValue
+                if newValue > max.wrappedValue { max.wrappedValue = newValue }
+            }
+        )
+        let maxBinding = Binding<CGFloat>(
+            get: { max.wrappedValue },
+            set: { newValue in
+                max.wrappedValue = newValue
+                if newValue < min.wrappedValue { min.wrappedValue = newValue }
+            }
+        )
+        return HStack(spacing: 12) {
             Text(label).frame(width: 120, alignment: .leading)
-            Stepper(value: min, in: bound, step: 20) {
+            Stepper(value: minBinding, in: bound, step: 20) {
                 Text("min \(Int(min.wrappedValue))pt").monospacedDigit()
             }
-            Stepper(value: max, in: bound, step: 20) {
+            Stepper(value: maxBinding, in: bound, step: 20) {
                 Text("max \(Int(max.wrappedValue))pt").monospacedDigit()
             }
         }

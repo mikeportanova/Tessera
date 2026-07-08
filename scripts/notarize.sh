@@ -34,6 +34,19 @@ fi
 if ! grep -q "runtime" <<<"$SIGINFO"; then
     echo "▸ Re-signing with the hardened runtime (required for notarization)…"
     bash "$ROOT/scripts/build-app.sh"
+    # The rebuild picks whatever identity it finds — verify it actually produced a Developer ID
+    # signature with the hardened runtime before paying for a doomed notarization round-trip.
+    SIGINFO="$(codesign -dv --verbose=2 "$APP" 2>&1 || true)"
+    if ! grep -q "Authority=Developer ID Application" <<<"$SIGINFO"; then
+        echo "✗ Rebuild did not sign with a Developer ID identity — not submitting."
+        echo "  Install your Developer ID cert (scripts/install-cert.sh) and re-run."
+        exit 1
+    fi
+    if ! grep -q "runtime" <<<"$SIGINFO"; then
+        echo "✗ Rebuild still lacks the hardened runtime — not submitting."
+        echo "  Check the codesign flags in scripts/build-app.sh and re-run."
+        exit 1
+    fi
 fi
 
 # 3. Confirm credentials exist.

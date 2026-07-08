@@ -9,6 +9,7 @@ public final class LayoutPreview: NSObject {
     private var ghostPanels: [NSPanel] = []
     private var hud: NSPanel?
     private var continuation: CheckedContinuation<Bool, Never>?
+    private var timeoutTask: Task<Void, Never>?
 
     /// Present the proposed frames (CG top-left coords) and await the user's choice.
     /// Times out as "cancel" after 30s so an unattended prompt can't hold the engine forever.
@@ -18,8 +19,9 @@ public final class LayoutPreview: NSObject {
         showHUD()
         return await withCheckedContinuation { c in
             continuation = c
-            Task { [weak self] in
+            timeoutTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(30))
+                guard !Task.isCancelled else { return }
                 self?.finish(false)
             }
         }
@@ -29,6 +31,8 @@ public final class LayoutPreview: NSObject {
     @objc private func cancelPressed() { finish(false) }
 
     private func finish(_ apply: Bool, resume: Bool = true) {
+        timeoutTask?.cancel()
+        timeoutTask = nil
         ghostPanels.forEach { $0.orderOut(nil) }
         ghostPanels = []
         hud?.orderOut(nil)
