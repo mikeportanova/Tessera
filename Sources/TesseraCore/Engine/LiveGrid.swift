@@ -55,7 +55,7 @@ public enum Reflow {
     }
 
     /// Given a window resized from `oldFrame` to `newFrame`, adjust its neighbors so the layout stays
-    /// gapless and non-overlapping. Returns updated targets (including the resized tile, now
+    /// gapless and non-overlapping. Returns the updated targets (including the resized tile, now at
     /// `newFrame`).
     ///
     /// Each moved edge of the resized window is treated as a **divider**, and every tile whose own
@@ -63,8 +63,10 @@ public enum Reflow {
     /// edge sits one gap away) and any tile on the *same* side (its matching edge coincides, e.g. a
     /// tile stacked in the same column). Because a tile can border two moved dividers at once, this
     /// also resizes the **diagonal** tile in a grid — dragging a window's corner keeps the whole grid
-    /// clean rather than leaving the diagonal behind. Alignment is the guard: only tiles whose edges
-    /// actually coincide with a moved divider are touched, so unrelated tiles stay put.
+    /// clean rather than leaving the diagonal behind. Alignment alone isn't membership, though: a
+    /// tile must also be **connected** to the resized window along the divider line (see
+    /// `connectedAlongDivider`), so an unrelated divider elsewhere on screen that merely happens to
+    /// share the coordinate stays put.
     public static func afterResize(
         tiles: [GridTile],
         resizedIndex: Int,
@@ -77,54 +79,75 @@ public enum Reflow {
         var out = tiles
         out[resizedIndex].target = newFrame
 
-        let dRight = newFrame.maxX - oldFrame.maxX
-        let dLeft = newFrame.minX - oldFrame.minX
+        let dRight  = newFrame.maxX - oldFrame.maxX
+        let dLeft   = newFrame.minX - oldFrame.minX
         let dBottom = newFrame.maxY - oldFrame.maxY
-        let dTop = newFrame.minY - oldFrame.minY
+        let dTop    = newFrame.minY - oldFrame.minY
+
+        // Resolve each moved divider's membership up front. A tile joins only if its edge lies on
+        // the divider line AND its span chains back to the resized window along that line.
+        let xSpan = (lo: oldFrame.minX, hi: oldFrame.maxX)
+        let ySpan = (lo: oldFrame.minY, hi: oldFrame.maxY)
+        let onRight: Set<Int> = abs(dRight) <= 0.5 ? [] : connectedAlongDivider(
+            tiles: tiles, resizedIndex: resizedIndex, seed: ySpan, gap: gap,
+            onDivider: { approxEqual($0.minX, oldFrame.maxX + gap) || approxEqual($0.maxX, oldFrame.maxX) },
+            span: { ($0.minY, $0.maxY) })
+        let onLeft: Set<Int> = abs(dLeft) <= 0.5 ? [] : connectedAlongDivider(
+            tiles: tiles, resizedIndex: resizedIndex, seed: ySpan, gap: gap,
+            onDivider: { approxEqual($0.maxX, oldFrame.minX - gap) || approxEqual($0.minX, oldFrame.minX) },
+            span: { ($0.minY, $0.maxY) })
+        let onBottom: Set<Int> = abs(dBottom) <= 0.5 ? [] : connectedAlongDivider(
+            tiles: tiles, resizedIndex: resizedIndex, seed: xSpan, gap: gap,
+            onDivider: { approxEqual($0.minY, oldFrame.maxY + gap) || approxEqual($0.maxY, oldFrame.maxY) },
+            span: { ($0.minX, $0.maxX) })
+        let onTop: Set<Int> = abs(dTop) <= 0.5 ? [] : connectedAlongDivider(
+            tiles: tiles, resizedIndex: resizedIndex, seed: xSpan, gap: gap,
+            onDivider: { approxEqual($0.maxY, oldFrame.minY - gap) || approxEqual($0.minY, oldFrame.minY) },
+            span: { ($0.minX, $0.maxX) })
 
         for k in out.indices where k != resizedIndex {
             var f = out[k].target
 
-            // When honoring a moved divider would shrink a tile below `minSize`, the tile pins at
-            // min size with its FAR edge held in place (the divider stops short for it), rather
-            // than letting its far edge follow the origin past its old bound — that would shove it
-            // over the next column/row or off-screen. The bounded overlap that remains is with the
+            // When honoring the moved divider would shrink a tile below `minSize`, the tile pins at
+            // min size with its FAR edge held in place (the divider stops short for it), rather than
+            // letting the far edge follow the origin past its old bound — that would shove it
+            // over the next column/row or off-screen. The bounded overlap remains with the
             // resized window itself, which the user is actively dragging.
 
             // Vertical divider at the resized window's RIGHT edge.
-            if abs(dRight) > 0.5 {
-                if approxEqual(f.minX, oldFrame.maxX + gap) {          // tile to the right → move its left edge
+            if onRight.contains(k) {
+                if approxEqual(f.minX, oldFrame.maxX + gap) { // tile to the right → move left edge
                     let newMinX = min(newFrame.maxX + gap, f.maxX - minSize.width)
                     f = CGRect(x: newMinX, y: f.minY, width: f.maxX - newMinX, height: f.height)
-                } else if approxEqual(f.maxX, oldFrame.maxX) {         // tile sharing that right edge → move its right edge
+                } else if approxEqual(f.maxX, oldFrame.maxX) { // tile sharing the right edge → move right edge
                     f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newFrame.maxX - f.minX), height: f.height)
                 }
             }
             // Vertical divider at the resized window's LEFT edge.
-            if abs(dLeft) > 0.5 {
-                if approxEqual(f.maxX, oldFrame.minX - gap) {          // tile to the left → move its right edge
+            if onLeft.contains(k) {
+                if approxEqual(f.maxX, oldFrame.minX - gap) { // tile to the left → move right edge
                     let newMaxX = newFrame.minX - gap
                     f = CGRect(x: f.minX, y: f.minY, width: max(minSize.width, newMaxX - f.minX), height: f.height)
-                } else if approxEqual(f.minX, oldFrame.minX) {         // tile sharing that left edge → move its left edge
+                } else if approxEqual(f.minX, oldFrame.minX) { // tile sharing the left edge → move left edge
                     let newMinX = min(newFrame.minX, f.maxX - minSize.width)
                     f = CGRect(x: newMinX, y: f.minY, width: f.maxX - newMinX, height: f.height)
                 }
             }
             // Horizontal divider at the resized window's BOTTOM edge.
-            if abs(dBottom) > 0.5 {
-                if approxEqual(f.minY, oldFrame.maxY + gap) {          // tile below → move its top edge
+            if onBottom.contains(k) {
+                if approxEqual(f.minY, oldFrame.maxY + gap) { // tile below → move top edge
                     let newMinY = min(newFrame.maxY + gap, f.maxY - minSize.height)
                     f = CGRect(x: f.minX, y: newMinY, width: f.width, height: f.maxY - newMinY)
-                } else if approxEqual(f.maxY, oldFrame.maxY) {         // tile sharing that bottom edge → move its bottom edge
+                } else if approxEqual(f.maxY, oldFrame.maxY) { // tile sharing the bottom edge → move bottom edge
                     f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newFrame.maxY - f.minY))
                 }
             }
             // Horizontal divider at the resized window's TOP edge.
-            if abs(dTop) > 0.5 {
-                if approxEqual(f.maxY, oldFrame.minY - gap) {          // tile above → move its bottom edge
+            if onTop.contains(k) {
+                if approxEqual(f.maxY, oldFrame.minY - gap) { // tile above → move bottom edge
                     let newMaxY = newFrame.minY - gap
                     f = CGRect(x: f.minX, y: f.minY, width: f.width, height: max(minSize.height, newMaxY - f.minY))
-                } else if approxEqual(f.minY, oldFrame.minY) {         // tile sharing that top edge → move its top edge
+                } else if approxEqual(f.minY, oldFrame.minY) { // tile sharing the top edge → move top edge
                     let newMinY = min(newFrame.minY, f.maxY - minSize.height)
                     f = CGRect(x: f.minX, y: newMinY, width: f.width, height: f.maxY - newMinY)
                 }
@@ -133,6 +156,43 @@ public enum Reflow {
             out[k].target = f
         }
         return out
+    }
+
+    /// Tiles that belong to a moved divider. Edge alignment alone can't decide this: two
+    /// independent dividers on opposite sides of the screen may share a coordinate by coincidence,
+    /// and moving one must not move the other. Starting from the resized window's own extent along
+    /// the divider (`seed`), spans grow through candidate tiles whose intervals touch the
+    /// accumulated set (within gap + tolerance, so tiles meeting only at a gapped corner still
+    /// chain — the diagonal tile in a 2×2 grid depends on this). Candidates whose span never
+    /// connects back to the resized window are left out.
+    private static func connectedAlongDivider(
+        tiles: [GridTile],
+        resizedIndex: Int,
+        seed: (lo: CGFloat, hi: CGFloat),
+        gap: CGFloat,
+        onDivider: (CGRect) -> Bool,
+        span: (CGRect) -> (lo: CGFloat, hi: CGFloat)
+    ) -> Set<Int> {
+        let slack = gap + tolerance
+        var candidates: [(index: Int, span: (lo: CGFloat, hi: CGFloat))] = []
+        for k in tiles.indices where k != resizedIndex && onDivider(tiles[k].target) {
+            candidates.append((k, span(tiles[k].target)))
+        }
+
+        var spans = [seed]
+        var included = Set<Int>()
+        var grew = true
+        while grew {
+            grew = false
+            for c in candidates where !included.contains(c.index) {
+                if spans.contains(where: { c.span.lo <= $0.hi + slack && $0.lo <= c.span.hi + slack }) {
+                    included.insert(c.index)
+                    spans.append(c.span)
+                    grew = true
+                }
+            }
+        }
+        return included
     }
 
     /// Index of the tile whose target frame contains `point`, if any.

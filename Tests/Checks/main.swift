@@ -218,6 +218,25 @@ do {
 }
 
 do {
+    // Coincidentally aligned divider must NOT move: three columns; left and right columns are each
+    // split at the same y≈500, but the full-height middle column breaks any chain between them.
+    // Dragging the left column's divider must leave the right column's split untouched.
+    let gap: CGFloat = 8
+    let lt = makeTile(CGRect(x: 0,    y: 0,   width: 300, height: 500))   // 0: left-top (resized)
+    let lb = makeTile(CGRect(x: 0,    y: 508, width: 300, height: 500))   // 1: left-bottom
+    let mid = makeTile(CGRect(x: 308, y: 0,   width: 300, height: 1008))  // 2: middle, full height
+    let rt = makeTile(CGRect(x: 616,  y: 0,   width: 300, height: 500))   // 3: right-top
+    let rb = makeTile(CGRect(x: 616,  y: 508, width: 300, height: 500))   // 4: right-bottom
+    let oldFrame = lt.target
+    let newFrame = CGRect(x: 0, y: 0, width: 300, height: 580) // grow 80pt taller
+    let out = Reflow.afterResize(tiles: [lt, lb, mid, rt, rb], resizedIndex: 0, oldFrame: oldFrame, newFrame: newFrame, gap: gap)
+    check(approxEqual(out[1].target.minY, 588), "left-bottom top edge tracks its own divider")
+    check(approxEqual(out[3].target.maxY, 500) && approxEqual(out[4].target.minY, 508),
+          "coincidentally aligned divider in a disconnected column stays put")
+    check(approxEqual(out[2].target.height, 1008), "full-height middle column is untouched")
+}
+
+do {
     let tiles = [
         makeTile(CGRect(x: 0, y: 0, width: 100, height: 100)),
         makeTile(CGRect(x: 200, y: 0, width: 100, height: 100)),
